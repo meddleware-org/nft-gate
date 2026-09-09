@@ -73,10 +73,11 @@ new_sqlite_classes = ["NonceRateState"]
 # id = "<KV_NAMESPACE_ID>"   # create with: wrangler kv namespace create NONCE_KV
 
 # ── route: Worker serves as the public NFT-gated relay endpoint ───────────────────────────────
-# operator: uncomment and fill in after creating the Worker route in the CF dashboard
-# [[routes]]
-# pattern = "nft-gate.example.com/*"
-# zone_name = "example.com"
+# Configured via CF API (route ID 63427e4dbf9b4428ad9c492487953551).
+# wrangler deploy will create/update this automatically.
+[[routes]]
+pattern = "sui-walrus-relay-testnet.meddleware.co.uk/*"
+zone_name = "meddleware.co.uk"
 
 # ── optional quota guard (needs QUOTA_GUARD_ENABLED=true + the secrets above) ────────────────
 # [triggers]
