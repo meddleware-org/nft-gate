@@ -9,6 +9,10 @@ async function call(method: string, path: string, headers?: Record<string, strin
   return worker.fetch(new Request('https://gw.example.com' + path, { method, headers }), e)
 }
 
+function hasCors(res: Response): boolean {
+  return res.headers.get('access-control-allow-origin') === '*'
+}
+
 // Routing parity with main.rs (paths that don't require the upstream or a live RPC).
 describe('router', () => {
   it('GET /healthz → 200 ok', async () => {
@@ -37,6 +41,32 @@ describe('router', () => {
     const res = await call('POST', '/v1/blob-upload', { authorization: 'Bearer !!!not-base64!!!' })
     expect(res.status).toBe(403)
     expect(await res.json()).toEqual({ error: 'malformed access proof' })
+  })
+
+  it('OPTIONS /v1/challenge → 204 preflight with CORS headers', async () => {
+    const res = await call('OPTIONS', '/v1/challenge')
+    expect(res.status).toBe(204)
+    expect(hasCors(res)).toBe(true)
+    expect(res.headers.get('access-control-allow-methods')).toContain('GET')
+    expect(res.headers.get('access-control-allow-headers')).toContain('authorization')
+  })
+
+  it('OPTIONS /v1/store → 204 preflight with CORS headers', async () => {
+    const res = await call('OPTIONS', '/v1/store')
+    expect(res.status).toBe(204)
+    expect(hasCors(res)).toBe(true)
+  })
+
+  it('GET /v1/challenge → has Access-Control-Allow-Origin', async () => {
+    const res = await call('GET', '/v1/challenge')
+    expect(res.status).toBe(200)
+    expect(hasCors(res)).toBe(true)
+  })
+
+  it('401 missing proof → has Access-Control-Allow-Origin', async () => {
+    const res = await call('POST', '/v1/blob-upload')
+    expect(res.status).toBe(401)
+    expect(hasCors(res)).toBe(true)
   })
 
   it('challenge → sign is a full round trip the nonce store accepts once', async () => {

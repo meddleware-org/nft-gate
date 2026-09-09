@@ -1,6 +1,6 @@
-{
+ {
   "name": "@meddleware/nft-gate-gateway",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "type": "module",
   "description": "Cloudflare Workers implementation of the nft-gate gateway: a wire-identical, drop-in sibling of the Rust gateway that gates any HTTP upstream behind an access_gate NFT.",
   "license": "0BSD",

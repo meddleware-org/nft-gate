@@ -15,6 +15,7 @@ import { SuiRpc } from './chain.js'
 import { verifyAccessRequest, deniedReason } from './verify.js'
 import { forward } from './proxy.js'
 import { runQuotaGuard } from './quota.js'
+import { withCors, corsPreflightResponse } from './cors.js'
 
 export { NonceRateState } from './state/durable_object.js'
 
@@ -124,6 +125,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   if (path === '/healthz') return new Response('ok', { status: 200 })
 
+  // Handle CORS preflight before any auth check. The browser sends OPTIONS before
+  // non-simple cross-origin requests (e.g. PUT/POST with Authorization); responding
+  // here avoids the auth path returning 401 and causing the browser to abort.
+  if (request.method === 'OPTIONS') return corsPreflightResponse()
+
   let state: GatewayState
   try {
     state = await getState(env)
@@ -163,7 +169,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
  */
 export default {
   fetch(request: Request, env: Env): Promise<Response> {
-    return handle(request, env)
+    return handle(request, env).then(withCors)
   },
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     if ((env.QUOTA_GUARD_ENABLED ?? 'false').toLowerCase() === 'true') {
