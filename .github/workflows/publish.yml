@@ -334,7 +334,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
@@ -345,9 +345,10 @@ jobs:
       - name: Publish to npmjs (provenance via OIDC, idempotent)
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-            "https://registry.npmjs.org/@meddleware%2fnft-gate-gateway/${VERSION}")
-          if [ "$HTTP" = "200" ]; then
+          # Use npm view (registry API) instead of curl (CDN) to avoid propagation-lag
+          # false negatives that cause the publish to be attempted when the version is
+          # already live but not yet reflected on the CDN.
+          if npm view "@meddleware/nft-gate-gateway@${VERSION}" version >/dev/null 2>&1; then
             echo "::notice::v${VERSION} already published to npmjs — skipping"
           else
             npm publish --provenance
