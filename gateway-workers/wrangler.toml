@@ -52,6 +52,13 @@ RATE_LIMIT_PER_MIN = "30"
 MAX_BODY_BYTES = "104857600"
 CHALLENGE_TTL_SECS = "300"
 OWNERSHIP_CACHE_TTL_MS = "0"
+# Single-use redemption: the permanent on-chain consumeDigest is the one-time token. A use is only
+# spent when an upload actually succeeds (commit); an interrupted upload releases the lease so the
+# consume stays redeemable (the use is never lost). LEASE_TTL bounds an in-flight upload; RETENTION
+# is how long a spent consume is remembered to block re-redemption (30d; a consume older than this
+# could be re-redeemed — an obscure, low-value edge).
+REDEMPTION_LEASE_TTL_SECS = "120"
+REDEMPTION_RETENTION_SECS = "2592000"
 # Workers-specific:
 NONCE_BACKEND = "durable-object" # "durable-object" (default) | "kv"
 NONCE_SHARD = "region"           # "region" (default) | "global"

@@ -1,10 +1,20 @@
 /**
- * Production {@link ChainQuery} over Sui JSON-RPC (`suix_getOwnedObjects`, `suix_queryEvents`,
- * `sui_getTransactionBlock`) via `fetch`. A 1:1 port of the Rust gateway's `sui_rpc.rs`,
- * including the identical request JSON shapes. The pure match/parse helpers are exported for
- * unit tests; the RPC round-trips are covered by the localnet/integration loop.
+ * Production {@link ChainQuery} over the Sui **gRPC** API (`@mysten/sui/grpc` `SuiGrpcClient`).
+ *
+ * Public Sui fullnodes have deprecated JSON-RPC (`suix_queryEvents`, `sui_getTransactionBlock`,
+ * `suix_getOwnedObjects` now return `-32601 Method not found`), so the gateway queries the chain
+ * over gRPC — the same transport `@meddleware/walrus-client` and `@meddleware/nft-gate-client`
+ * already use. The pure match/parse helpers are exported for unit tests; the gRPC round-trips are
+ * covered by the localnet/integration loop.
+ *
+ * Single-use verification is now **digest-first**: the access proof already carries the on-chain
+ * `access_gate::consume` transaction digest, so the gateway fetches that exact transaction and
+ * verifies it succeeded and emitted a matching `AccessConsumedEvent`. This is precise (bound to the
+ * challenge nonce + sender + gate) and does not need the deprecated event-by-sender query.
  */
 
+import { SuiGrpcClient } from '@mysten/sui/grpc'
+import { fetchAccessNfts } from '@meddleware/nft-gate-client'
 import type { ChainQuery } from './verify.js'
 import { base64ToBytes } from './crypto.js'
 
@@ -20,44 +30,37 @@ interface CacheEntry {
   expiry: number
 }
 
-/** Production {@link ChainQuery} backed by Sui JSON-RPC, with an optional ownership cache. */
-export class SuiRpc implements ChainQuery {
+/** Number of `getTransaction` attempts (absorbs fullnode indexing lag after the client's finality wait). */
+const TX_FETCH_ATTEMPTS = 4
+/** Delay between `getTransaction` retries, in ms. */
+const TX_FETCH_RETRY_MS = 500
+
+/** Production {@link ChainQuery} backed by the Sui gRPC API, with an optional ownership cache. */
+export class SuiGrpc implements ChainQuery {
   private readonly cache = new Map<string, CacheEntry>()
+  private readonly client: SuiGrpcClient
 
   /**
-   * @param rpcUrl - Sui JSON-RPC endpoint URL.
+   * @param rpcUrl - Sui gRPC endpoint base URL (e.g. `https://fullnode.testnet.sui.io:443`).
    * @param cacheTtlMs - Ownership-cache TTL in ms. 0 disables the cache (live check every request).
-   * @param authHeader - Optional header injected on every RPC call (e.g. credentialed fullnode auth).
+   * @param authHeader - Optional header injected on every gRPC call (e.g. credentialed fullnode auth).
    */
   constructor(
     private readonly rpcUrl: string,
     /** Ownership-cache TTL (ms). 0 = disabled (every gated check is live on-chain). */
     private readonly cacheTtlMs: number = 0,
-    private readonly authHeader?: { name: string; value: string },
-  ) {}
-
-  /**
-   * Send a Sui JSON-RPC 2.0 request and return the `result` field.
-   *
-   * @param method - JSON-RPC method name (e.g. `suix_getOwnedObjects`).
-   * @param params - Positional parameters array.
-   * @returns The `result` value from the RPC response, or `null`.
-   * @throws If the HTTP response is not OK or the RPC body contains an `error` field.
-   */
-  private async call(method: string, params: Json): Promise<Json> {
-    const headers: Record<string, string> = { 'content-type': 'application/json' }
-    if (this.authHeader) headers[this.authHeader.name] = this.authHeader.value
-    const resp = await fetch(this.rpcUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    authHeader?: { name: string; value: string },
+  ) {
+    // The `network` label is cosmetic when an explicit `baseUrl` is supplied (core RPC resolves via
+    // the endpoint, not the label); infer it from the URL so a mainnet fullnode is labelled correctly.
+    const network = /mainnet/i.test(rpcUrl) ? 'mainnet' : 'testnet'
+    this.client = new SuiGrpcClient({
+      network,
+      baseUrl: rpcUrl,
+      // gRPC-web metadata keys must be lower-case ASCII; a credentialed fullnode auth header
+      // (e.g. `Authorization: Bearer …`) is threaded here on every call.
+      ...(authHeader ? { meta: { [authHeader.name.toLowerCase()]: authHeader.value } } : {}),
     })
-    if (!resp.ok) throw new Error(`rpc http ${resp.status} from ${method}`)
-    const json = (await resp.json()) as Record<string, Json>
-    if (json && typeof json === 'object' && 'error' in json && json.error) {
-      throw new Error(`rpc error from ${method}: ${JSON.stringify(json.error)}`)
-    }
-    return (json as { result?: Json }).result ?? null
   }
 
   /**
@@ -84,7 +87,9 @@ export class SuiRpc implements ChainQuery {
   }
 
   /**
-   * Uncached, live `suix_getOwnedObjects` ownership query.
+   * Uncached, live ownership query over gRPC `listOwnedObjects`. Reuses `fetchAccessNfts` from
+   * `@meddleware/nft-gate-client` (the same gRPC core-API parse the frontend uses), so the
+   * gateway and client agree on what counts as a held access NFT.
    *
    * @param address - Sui address to query.
    * @param nftType - NFT struct type to filter by.
@@ -92,16 +97,8 @@ export class SuiRpc implements ChainQuery {
    * @returns `true` if at least one qualifying NFT is owned.
    */
   private async ownsNftLive(address: string, nftType: string, gateId?: string): Promise<boolean> {
-    const params = [
-      address,
-      { filter: { StructType: nftType }, options: { showContent: true } },
-      null,
-      50,
-    ]
-    const result = (await this.call('suix_getOwnedObjects', params)) as { data?: Json[] } | null
-    const data = (result && Array.isArray(result.data) ? result.data : []) as Json[]
-    if (gateId === undefined) return data.length > 0
-    return data.some((entry) => pointerStr(entry, ['data', 'content', 'fields', 'data', 'fields', 'gate_id']) === gateId)
+    const nfts = await fetchAccessNfts(this.client, address, nftType, gateId)
+    return nfts.length > 0
   }
 
   /**
@@ -116,7 +113,7 @@ export class SuiRpc implements ChainQuery {
   async ownsNft(address: string, nftType: string, gateId?: string): Promise<boolean> {
     // Cache is OFF by default (ttl 0) so a gated action is confirmed live on-chain.
     if (this.cacheTtlMs > 0) {
-      const key = SuiRpc.cacheKey(address, nftType, gateId)
+      const key = SuiGrpc.cacheKey(address, nftType, gateId)
       const hit = this.cache.get(key)
       const now = Date.now()
       if (hit && hit.expiry > now) return hit.owns
@@ -128,70 +125,64 @@ export class SuiRpc implements ChainQuery {
   }
 
   /**
-   * Directly verify the consume transaction named by `digest` via `sui_getTransactionBlock`.
-   * The tx must have succeeded and emitted a matching `AccessConsumedEvent`. Defence-in-depth
-   * atop the sender+nonce event query.
+   * Fetch a transaction by digest via gRPC, retrying briefly to absorb the window between the
+   * client's finality wait and the gateway fullnode indexing the transaction.
    *
-   * @param digest - Transaction digest of the on-chain consume.
-   * @param nonce - The challenge nonce that was consumed.
-   * @param address - Expected transaction sender.
-   * @param gateId - Optional gate object ID constraint.
-   * @returns `true` if the transaction confirms the consume.
+   * @param digest - Transaction digest to fetch.
+   * @returns The gRPC `TransactionResult` (`$kind: 'Transaction' | 'FailedTransaction'`).
+   * @throws If every attempt fails (surfaces as a {@link ChainQuery} ChainError → 502).
    */
-  private async consumeTxMatches(
-    digest: string,
-    nonce: string,
-    address: string,
-    gateId?: string,
-  ): Promise<boolean> {
-    const params = [digest, { showEvents: true, showEffects: true }]
-    const result = (await this.call('sui_getTransactionBlock', params)) as Json
-    const status = pointerStr(result, ['effects', 'status', 'status'])
-    if (status !== 'success') return false
-    const events = (pointer(result, ['events']) as Json[] | undefined) ?? []
-    return (
-      Array.isArray(events) &&
-      events.some((ev) => isConsumedEvent(ev) && eventMatches(ev, nonce, address, gateId))
-    )
+  private async getTransaction(digest: string): Promise<Json> {
+    let lastErr: unknown
+    for (let attempt = 0; attempt < TX_FETCH_ATTEMPTS; attempt++) {
+      try {
+        return (await this.client.core.getTransaction({
+          digest,
+          include: { events: true },
+        })) as Json
+      } catch (e) {
+        lastErr = e
+        if (attempt < TX_FETCH_ATTEMPTS - 1) {
+          await new Promise<void>((r) => setTimeout(r, TX_FETCH_RETRY_MS))
+        }
+      }
+    }
+    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
   }
 
   /**
-   * Verify a single-use consume via `suix_queryEvents`. Queries for an `AccessConsumedEvent`
-   * emitted by `address` carrying `nonce`; if `consumeDigest` is also provided, additionally
-   * verifies that exact transaction (F4: defence in depth).
+   * Verify a single-use consume by fetching its `consumeDigest` transaction directly and confirming
+   * it succeeded and emitted an `AccessConsumedEvent` for this sender + gate.
    *
-   * @param nonce - The challenge nonce that was consumed.
-   * @param address - The Sui address that submitted the consume transaction.
-   * @param nftType - Fully-qualified NFT type used to derive the event package.
+   * The event is bound to the sender (which must equal the signature-verified proof address) and
+   * the gate — NOT to the challenge nonce. Decoupling from the nonce is what lets an interrupted
+   * upload resume with a fresh (free) challenge signature while reusing the same on-chain consume;
+   * single-use is then enforced by the gateway's redemption store keying on this `consumeDigest`.
+   * An attacker cannot present someone else's consume (the event `sender` would not match the
+   * signed address) nor forge one without owning the soulbound NFT.
+   *
+   * @param consumeDigest - Transaction digest of the on-chain consume.
+   * @param address - The signature-verified proof address; must equal the event sender.
    * @param gateId - Optional gate object ID constraint.
-   * @param consumeDigest - Optional transaction digest for direct tx verification.
-   * @returns `true` if a matching consume event (and, when given, a matching tx) is found.
+   * @returns `true` if the transaction confirms a matching consume.
    */
-  async consumeEventMatches(
-    nonce: string,
-    address: string,
-    nftType: string,
-    gateId?: string,
-    consumeDigest?: string,
-  ): Promise<boolean> {
-    const pkg = SuiRpc.packageOf(nftType)
-    if (!pkg) throw new Error('cannot derive package from nft_type')
-    const eventType = `${pkg}::access_gate::AccessConsumedEvent`
-    // Filter by BOTH the event type AND the emitting Sender (F5): O(this user's events).
-    const params = [{ All: [{ MoveEventType: eventType }, { Sender: address }] }, null, 50, true]
-    const result = (await this.call('suix_queryEvents', params)) as { data?: Json[] } | null
-    const data = (result && Array.isArray(result.data) ? result.data : []) as Json[]
-    const primary = data.some((ev) => eventMatches(ev, nonce, address, gateId))
-    if (!primary) return false
-    // F4: if a consume tx digest was supplied, verify that exact transaction too.
-    if (consumeDigest !== undefined) {
-      return this.consumeTxMatches(consumeDigest, nonce, address, gateId)
-    }
-    return true
+  async consumeTxValid(consumeDigest: string, address: string, gateId?: string): Promise<boolean> {
+    const res = (await this.getTransaction(consumeDigest)) as Record<string, Json> | null
+    // The gRPC result is a oneof: `{ $kind: 'Transaction', Transaction }` on success, or
+    // `{ $kind: 'FailedTransaction', FailedTransaction }` when the transaction aborted.
+    if (!res || res.$kind !== 'Transaction') return false
+    const tx = res.Transaction as Record<string, Json> | undefined
+    const status = tx?.status as { success?: boolean } | undefined
+    if (!status?.success) return false
+    const events = (Array.isArray(tx?.events) ? (tx?.events as Json[]) : []) as Json[]
+    return events.some((ev) => isConsumedEvent(ev) && eventMatches(ev, address, gateId))
   }
 }
 
-// ── pure helpers (unit-tested; mirror sui_rpc.rs) ────────────────────────────
+// ── pure helpers (unit-tested; adapted to the gRPC event shape) ───────────────
+// gRPC events expose `eventType`/`sender`/`json`; JSON-RPC used `type`/`sender`/`parsedJson`.
+// The helpers read both keys so they stay tolerant to transport/shape variation (the SDK documents
+// that the `json` shape may differ between transports).
 
 /**
  * Traverse a nested JSON value by a sequence of object keys.
@@ -224,14 +215,24 @@ function pointerStr(v: Json, path: string[]): string | undefined {
   return typeof r === 'string' ? r : undefined
 }
 
+/** The event's Move type string, from the gRPC (`eventType`) or JSON-RPC (`type`) shape. */
+function eventType(ev: Json): string | undefined {
+  return pointerStr(ev, ['eventType']) ?? pointerStr(ev, ['type'])
+}
+
+/** The event's parsed Move struct fields, from the gRPC (`json`) or JSON-RPC (`parsedJson`) shape. */
+function eventFields(ev: Json): Json {
+  return pointer(ev, ['json']) ?? pointer(ev, ['parsedJson'])
+}
+
 /** True if the event's type ends with `::access_gate::AccessConsumedEvent`. */
 export function isConsumedEvent(ev: Json): boolean {
-  const t = pointerStr(ev, ['type'])
+  const t = eventType(ev)
   return t !== undefined && t.endsWith('::access_gate::AccessConsumedEvent')
 }
 
 /**
- * Match the on-chain `AccessConsumedEvent.nonce` (`vector<u8>`), rendered by RPC as either an
+ * Match the on-chain `AccessConsumedEvent.nonce` (`vector<u8>`), rendered by the API as either an
  * array of byte numbers or a base64 string, against the challenge nonce's UTF-8 bytes.
  */
 export function nonceMatches(eventNonce: Json, nonce: string): boolean {
@@ -251,11 +252,14 @@ export function nonceMatches(eventNonce: Json, nonce: string): boolean {
   return false
 }
 
-/** sender == address, nonce matches, and (if given) gate_id matches. */
-export function eventMatches(ev: Json, nonce: string, address: string, gateId?: string): boolean {
+/**
+ * `sender == address` and (if given) `gate_id` matches. The consume event is bound to the
+ * signature-verified sender + gate; single-use is enforced separately by redemption tracking on the
+ * `consumeDigest`, so the event nonce is intentionally not checked here (see `consumeTxValid`).
+ */
+export function eventMatches(ev: Json, address: string, gateId?: string): boolean {
   const senderOk = pointerStr(ev, ['sender']) === address
-  const nonceVal = pointer(ev, ['parsedJson', 'nonce'])
-  const nonceOk = nonceVal !== undefined && nonceMatches(nonceVal, nonce)
-  const gateOk = gateId === undefined ? true : pointerStr(ev, ['parsedJson', 'gate_id']) === gateId
-  return senderOk && nonceOk && gateOk
+  const fields = eventFields(ev)
+  const gateOk = gateId === undefined ? true : pointerStr(fields, ['gate_id']) === gateId
+  return senderOk && gateOk
 }

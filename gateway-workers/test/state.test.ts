@@ -42,6 +42,47 @@ describe.each([
   })
 })
 
+// Single-use redemption: the consumeDigest is the one-time token. Same semantics on both backends.
+describe.each([
+  ['durable-object', () => doBackend()],
+  ['kv', () => kvBackend()],
+])('redemption backend: %s', (_name, make) => {
+  const key = () => '0xdigest' + Math.random().toString(16).slice(2)
+
+  it('leases once; a concurrent lease is rejected; commit marks it redeemed', async () => {
+    const store = make()
+    const k = key()
+    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok') // first claim
+    expect(await store.tryLeaseRedemption(k, 120)).toBe('leased') // in-flight duplicate
+    await store.commitRedemption(k, 3600)
+    expect(await store.tryLeaseRedemption(k, 120)).toBe('redeemed') // spent — never reusable
+  })
+
+  it('release makes an interrupted consume immediately re-leasable (use not lost)', async () => {
+    const store = make()
+    const k = key()
+    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok')
+    await store.releaseRedemption(k) // upload failed
+    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok') // retry with the same consume
+  })
+
+  it('release never clears a committed redemption', async () => {
+    const store = make()
+    const k = key()
+    await store.tryLeaseRedemption(k, 120)
+    await store.commitRedemption(k, 3600)
+    await store.releaseRedemption(k) // must be a no-op on a committed key
+    expect(await store.tryLeaseRedemption(k, 120)).toBe('redeemed')
+  })
+
+  it('an expired lease is reclaimable (crashed in-flight upload)', async () => {
+    const store = make()
+    const k = key()
+    expect(await store.tryLeaseRedemption(k, 0)).toBe('ok') // lease expires immediately
+    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok') // reclaimed, not stuck 'leased'
+  })
+})
+
 describe('durable-object rate limiter', () => {
   it('allows up to the limit then denies, per address', async () => {
     const store = doBackend()

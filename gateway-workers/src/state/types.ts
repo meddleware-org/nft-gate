@@ -10,6 +10,13 @@
  *   cross-region replay window in the `SINGLE_USE=false` ownership mode).
  */
 
+/**
+ * Outcome of a redemption-lease attempt (single-use mode). `ok` — the caller now holds the lease
+ * and must `commit`/`release` it. `leased` — another in-flight request holds it (concurrent
+ * duplicate). `redeemed` — it was already committed (the use is spent).
+ */
+export type LeaseResult = 'ok' | 'leased' | 'redeemed'
+
 export interface NonceBackend {
   /**
    * Issue a fresh, time-bound nonce. `region` selects the DO shard (ignored by KV, which is
@@ -20,6 +27,22 @@ export interface NonceBackend {
   takeIfValid(nonce: string): Promise<boolean>
   /** Fixed 60s window per verified address. `maxPerMin === 0` disables limiting. */
   rateCheck(address: string, maxPerMin: number, region: string): Promise<boolean>
+
+  // ── Single-use redemption (the permanent on-chain `consumeDigest` is the one-time token) ──
+  // A use is only spent when an upload actually succeeds: lease the digest, proxy, then commit on
+  // success or release on failure. An interrupted attempt leaves the digest redeemable, so a
+  // consumed NFT use is never lost. All three are atomic per key on the Durable Object backend.
+
+  /**
+   * Atomically claim `key` for an in-flight upload. `ok` on a fresh/expired-lease/released key,
+   * `leased` if another request holds an unexpired lease, `redeemed` if already committed. The
+   * lease self-expires after `leaseTtlSecs` so a crashed request cannot strand the key.
+   */
+  tryLeaseRedemption(key: string, leaseTtlSecs: number): Promise<LeaseResult>
+  /** Permanently mark `key` redeemed (retained `retentionSecs`), after a successful upload. */
+  commitRedemption(key: string, retentionSecs: number): Promise<void>
+  /** Release a lease on `key` (upload failed) so the same consume can be retried immediately. */
+  releaseRedemption(key: string): Promise<void>
 }
 
 /**

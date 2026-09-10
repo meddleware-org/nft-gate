@@ -27,6 +27,7 @@ export default defineConfig({
             'test/config.test.ts',
             'test/conformance.test.ts',
             'test/chain.test.ts',
+            'test/redemption.test.ts',
           ],
         },
       },

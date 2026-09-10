@@ -11,7 +11,7 @@ import type { Config, Env } from './config.js'
 import { loadConfig, isPublicPath } from './config.js'
 import type { NonceBackend } from './state/types.js'
 import { makeBackend } from './state/select.js'
-import { SuiRpc } from './chain.js'
+import { SuiGrpc } from './chain.js'
 import { verifyAccessRequest, deniedReason } from './verify.js'
 import { forward } from './proxy.js'
 import { runQuotaGuard } from './quota.js'
@@ -26,7 +26,7 @@ export { NonceRateState } from './state/durable_object.js'
 interface GatewayState {
   cfg: Config
   backend: NonceBackend
-  chain: SuiRpc
+  chain: SuiGrpc
 }
 
 /** Lazily initialised once per isolate; `null` before the first request. */
@@ -56,7 +56,7 @@ async function getState(env: Env): Promise<GatewayState> {
   cached = {
     cfg,
     backend: makeBackend(effective, env),
-    chain: new SuiRpc(cfg.suiRpcUrl, cfg.ownershipCacheTtlMs, cfg.suiRpcAuthHeader),
+    chain: new SuiGrpc(cfg.suiRpcUrl, cfg.ownershipCacheTtlMs, cfg.suiRpcAuthHeader),
   }
   return cached
 }
@@ -76,14 +76,16 @@ function json(status: number, body: unknown): Response {
 }
 
 /**
- * Build a JSON `{"error": reason}` response with the given status code.
+ * Build a JSON `{"error": reason}` response with the given status code, optionally with a stable
+ * machine-readable `code` (e.g. `"redeemed"` vs `"leased"`) so the client can react precisely.
  *
  * @param status - HTTP status code.
  * @param reason - Short, client-visible error description.
+ * @param code - Optional stable code for programmatic handling.
  * @returns A JSON error response.
  */
-function deny(status: number, reason: string): Response {
-  return json(status, { error: reason })
+function deny(status: number, reason: string, code?: string): Response {
+  return json(status, code ? { error: reason, code } : { error: reason })
 }
 
 /** Prefer `Authorization: Bearer <token>`; fall back to an explicit `X-Access-Proof` header. */
@@ -158,6 +160,34 @@ async function handle(request: Request, env: Env): Promise<Response> {
 
   if (!(await backend.rateCheck(result.address, cfg.rateLimitPerMin, regionOf(cfg, request)))) {
     return deny(429, 'rate limit exceeded')
+  }
+
+  // Single-use: the permanent on-chain `consumeDigest` is the one-time redemption token. Lease it,
+  // proxy, then COMMIT on a successful upload or RELEASE on failure — so an interrupted upload
+  // leaves the consume redeemable (the use is never lost) while a duplicate can't double-spend it.
+  const redemptionKey = result.redemptionKey
+  if (redemptionKey !== undefined) {
+    const lease = await backend.tryLeaseRedemption(redemptionKey, cfg.redemptionLeaseTtlSecs)
+    if (lease === 'redeemed') {
+      return deny(409, 'this consume has already been redeemed for an upload', 'redeemed')
+    }
+    if (lease === 'leased') {
+      return deny(409, 'an upload for this consume is already in progress', 'leased')
+    }
+    let resp: Response
+    try {
+      resp = await forward(cfg, request)
+    } catch (e) {
+      // Network/exception before a definitive upstream result — release so the user can retry.
+      await backend.releaseRedemption(redemptionKey)
+      throw e
+    }
+    if (resp.ok) {
+      await backend.commitRedemption(redemptionKey, cfg.redemptionRetentionSecs)
+    } else {
+      await backend.releaseRedemption(redemptionKey)
+    }
+    return resp
   }
 
   return forward(cfg, request)

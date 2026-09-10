@@ -38,6 +38,7 @@ function ed25519Token(seed: number, nonce: string, consumeDigest?: string) {
 // ── FakeBackend + MockChain (mirror the Rust in-memory store + MockChain) ────────────────────
 class FakeBackend implements NonceBackend {
   private nonces = new Map<string, { expiry: number; used: boolean }>()
+  private redemptions = new Map<string, { state: 'leased' | 'committed'; expiry: number }>()
   constructor(private ttlSecs = 300) {}
   issueSpecific(nonce: string) {
     this.nonces.set(nonce, { expiry: Date.now() + this.ttlSecs * 1000, used: false })
@@ -58,6 +59,22 @@ class FakeBackend implements NonceBackend {
   async rateCheck() {
     return true
   }
+  async tryLeaseRedemption(key: string, leaseTtlSecs: number): Promise<'ok' | 'leased' | 'redeemed'> {
+    const r = this.redemptions.get(key)
+    const now = Date.now()
+    if (r) {
+      if (r.state === 'committed') return 'redeemed'
+      if (r.state === 'leased' && r.expiry > now) return 'leased'
+    }
+    this.redemptions.set(key, { state: 'leased', expiry: now + leaseTtlSecs * 1000 })
+    return 'ok'
+  }
+  async commitRedemption(key: string, retentionSecs: number) {
+    this.redemptions.set(key, { state: 'committed', expiry: Date.now() + retentionSecs * 1000 })
+  }
+  async releaseRedemption(key: string) {
+    if (this.redemptions.get(key)?.state === 'leased') this.redemptions.delete(key)
+  }
 }
 
 class MockChain implements ChainQuery {
@@ -68,7 +85,7 @@ class MockChain implements ChainQuery {
   async ownsNft() {
     return this.owns
   }
-  async consumeEventMatches() {
+  async consumeTxValid() {
     return this.consumed
   }
 }
@@ -84,6 +101,8 @@ function cfg(singleUse: boolean): Config {
     rateLimitPerMin: 30,
     maxBodyBytes: 262144,
     ownershipCacheTtlMs: 0,
+    redemptionLeaseTtlSecs: 120,
+    redemptionRetentionSecs: 2592000,
     nonceBackend: 'durable-object',
     nonceShard: 'global',
     nonceMaxEntries: 10000,
@@ -183,7 +202,7 @@ describe('verifyAccessRequest decision', () => {
     expect(res).toEqual({ ok: false, denied: 'BadProof' })
   })
 
-  it('single-use requires a matching consume event', async () => {
+  it('single-use requires a valid consume and returns the redemptionKey', async () => {
     const store = new FakeBackend()
     store.issueSpecific('n5')
     const b5 = ed25519Token(7, 'n5', '0xdigest')
@@ -193,7 +212,8 @@ describe('verifyAccessRequest decision', () => {
     store.issueSpecific('n6')
     const b6 = ed25519Token(7, 'n6', '0xdigest')
     const ok = await verifyAccessRequest(cfg(true), store, b6.token, new MockChain(false, true))
-    expect(ok).toEqual({ ok: true, address: b6.address })
+    // The digest is returned so the dispatcher can lease/commit it (single-use redemption).
+    expect(ok).toEqual({ ok: true, address: b6.address, redemptionKey: '0xdigest' })
   })
 
   it('single-use denies a missing consumeDigest', async () => {

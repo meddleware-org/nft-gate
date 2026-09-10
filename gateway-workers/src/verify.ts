@@ -117,16 +117,15 @@ function verifyEcdsa(
   return normalizeAddress(address) === deriveAddress(flag, pk)
 }
 
-/** On-chain lookups needed to authorise a request. Implemented by {@link ../chain.SuiRpc}. */
+/** On-chain lookups needed to authorise a request. Implemented by {@link ../chain.SuiGrpc}. */
 export interface ChainQuery {
   ownsNft(address: string, nftType: string, gateId?: string): Promise<boolean>
-  consumeEventMatches(
-    nonce: string,
-    address: string,
-    nftType: string,
-    gateId?: string,
-    consumeDigest?: string,
-  ): Promise<boolean>
+  /**
+   * True if `consumeDigest` names a successful `access_gate::consume` transaction that emitted an
+   * `AccessConsumedEvent` for `address` (the sender) on `gateId`. Not bound to the challenge nonce
+   * — single-use is enforced by the redemption store keying on the digest.
+   */
+  consumeTxValid(consumeDigest: string, address: string, gateId?: string): Promise<boolean>
 }
 
 /** The reason a request was rejected by {@link verifyAccessRequest}. Mirror of Rust `Denied`. */
@@ -136,6 +135,7 @@ export type Denied =
   | 'NonceInvalid'
   | 'NotOwner'
   | 'ConsumeMissing'
+  | 'RedeemConflict'
   | 'ChainError'
 
 /** A short, client-visible description of why access was denied. */
@@ -150,14 +150,22 @@ export function deniedReason(d: Denied): string {
     case 'NotOwner':
       return 'address does not hold the required access NFT'
     case 'ConsumeMissing':
-      return 'no matching single-use consume for this challenge'
+      return 'no matching single-use consume for this address'
+    case 'RedeemConflict':
+      return 'this consume is already redeemed or an upload for it is in progress'
     case 'ChainError':
       return 'on-chain verification failed'
   }
 }
 
-/** Result of {@link verifyAccessRequest}: the verified address on success, or a {@link Denied} reason. */
-export type VerifyResult = { ok: true; address: string } | { ok: false; denied: Denied }
+/**
+ * Result of {@link verifyAccessRequest}: the verified address on success, or a {@link Denied}
+ * reason. In single-use mode a successful result also carries `redemptionKey` (the `consumeDigest`)
+ * that the dispatcher leases/commits so the use is only spent on a successful upload.
+ */
+export type VerifyResult =
+  | { ok: true; address: string; redemptionKey?: string }
+  | { ok: false; denied: Denied }
 
 /**
  * Authorise a request from its base64 proof token. The nonce is consumed (single-use at the
@@ -193,26 +201,23 @@ export async function verifyAccessRequest(
     }
     let ok: boolean
     try {
-      ok = await chain.consumeEventMatches(
-        proof.nonce,
-        proof.address,
-        cfg.nftType,
-        cfg.gateId,
-        proof.consumeDigest,
-      )
+      ok = await chain.consumeTxValid(proof.consumeDigest, proof.address, cfg.gateId)
     } catch {
       return { ok: false, denied: 'ChainError' }
     }
     if (!ok) return { ok: false, denied: 'ConsumeMissing' }
-  } else {
-    let ok: boolean
-    try {
-      ok = await chain.ownsNft(proof.address, cfg.nftType, cfg.gateId)
-    } catch {
-      return { ok: false, denied: 'ChainError' }
-    }
-    if (!ok) return { ok: false, denied: 'NotOwner' }
+    // The consume is valid on-chain; the dispatcher leases/commits this digest so the use is
+    // spent only on a successful upload (and a duplicate can't double-spend it).
+    return { ok: true, address: proof.address, redemptionKey: proof.consumeDigest }
   }
+
+  let ok: boolean
+  try {
+    ok = await chain.ownsNft(proof.address, cfg.nftType, cfg.gateId)
+  } catch {
+    return { ok: false, denied: 'ChainError' }
+  }
+  if (!ok) return { ok: false, denied: 'NotOwner' }
 
   return { ok: true, address: proof.address }
 }

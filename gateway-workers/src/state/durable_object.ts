@@ -11,8 +11,11 @@
  */
 
 import { DurableObject } from 'cloudflare:workers'
-import type { NonceBackend } from './types.js'
+import type { LeaseResult, NonceBackend } from './types.js'
 import { randomHex24, shardOfNonce } from './types.js'
+
+/** Fixed shard name for the redemption store (the `consumeDigest` carries no region tag). */
+const REDEEM_SHARD = 'redeem'
 
 /** SQLite row shape for the `nonces` table. */
 interface NonceRow {
@@ -26,6 +29,11 @@ interface RateRow {
 /** Result row for `SELECT COUNT(*) AS c`. */
 interface CountRow {
   c: number
+}
+/** SQLite row shape for the `redemptions` table. */
+interface RedemptionRow {
+  state: string
+  expiry: number
 }
 
 /**
@@ -48,6 +56,12 @@ export class NonceRateState extends DurableObject {
     )
     this.sql.exec(
       'CREATE TABLE IF NOT EXISTS rate (addr TEXT PRIMARY KEY, start INTEGER NOT NULL, count INTEGER NOT NULL)',
+    )
+    // Redemption store: `state` is 'leased' (an in-flight upload holds the consume) or 'committed'
+    // (the use was spent on a successful upload). `expiry` is the lease deadline / committed
+    // retention deadline (unix ms).
+    this.sql.exec(
+      'CREATE TABLE IF NOT EXISTS redemptions (key TEXT PRIMARY KEY, state TEXT NOT NULL, expiry INTEGER NOT NULL)',
     )
   }
 
@@ -95,6 +109,54 @@ export class NonceRateState extends DurableObject {
     this.sql.exec('INSERT OR REPLACE INTO rate (addr, start, count) VALUES (?, ?, ?)', addr, start, count + 1)
     return true
   }
+
+  /**
+   * Atomically claim `key` for an in-flight upload (single-threaded DO ⇒ no race). Returns
+   * `'redeemed'` if already committed, `'leased'` if an unexpired lease is held, else `'ok'`
+   * after taking a fresh lease. An expired lease (crashed request) is reclaimable as `'ok'`.
+   */
+  tryLeaseRedemption(key: string, leaseTtlSecs: number, maxEntries: number): LeaseResult {
+    const now = Date.now()
+    // Bounded growth: drop expired leases and lapsed committed rows before inserting.
+    this.sql.exec("DELETE FROM redemptions WHERE state = 'leased' AND expiry <= ?", now)
+    this.sql.exec("DELETE FROM redemptions WHERE state = 'committed' AND expiry <= ?", now)
+    const rows = this.sql
+      .exec('SELECT state, expiry FROM redemptions WHERE key = ?', key)
+      .toArray() as unknown as RedemptionRow[]
+    if (rows.length > 0) {
+      const r = rows[0]
+      if (r.state === 'committed') return 'redeemed'
+      if (r.state === 'leased' && Number(r.expiry) > now) return 'leased'
+      // else: an expired lease — fall through and re-lease.
+    }
+    const count = (this.sql.exec('SELECT COUNT(*) AS c FROM redemptions').one() as unknown as CountRow).c
+    if (count >= Math.max(1, maxEntries)) {
+      // Evict the soonest-to-expire leased row (never a committed one — that would allow reuse).
+      this.sql.exec(
+        "DELETE FROM redemptions WHERE key = (SELECT key FROM redemptions WHERE state = 'leased' ORDER BY expiry ASC LIMIT 1)",
+      )
+    }
+    this.sql.exec(
+      "INSERT OR REPLACE INTO redemptions (key, state, expiry) VALUES (?, 'leased', ?)",
+      key,
+      now + leaseTtlSecs * 1000,
+    )
+    return 'ok'
+  }
+
+  /** Permanently mark `key` redeemed (retained `retentionSecs`) — the use is spent. */
+  commitRedemption(key: string, retentionSecs: number): void {
+    this.sql.exec(
+      "INSERT OR REPLACE INTO redemptions (key, state, expiry) VALUES (?, 'committed', ?)",
+      key,
+      Date.now() + retentionSecs * 1000,
+    )
+  }
+
+  /** Release a lease on `key` (upload failed) so the consume can be retried immediately. */
+  releaseRedemption(key: string): void {
+    this.sql.exec("DELETE FROM redemptions WHERE key = ? AND state = 'leased'", key)
+  }
 }
 
 /** {@link NonceBackend} that fans out to per-region {@link NonceRateState} DO shards. */
@@ -135,5 +197,19 @@ export class DurableObjectBackend implements NonceBackend {
   async rateCheck(address: string, maxPerMin: number, region: string): Promise<boolean> {
     const shard = this.shardMode === 'global' ? 'g' : region
     return this.stub(shard).rateCheck(address, maxPerMin)
+  }
+
+  // Redemption state has no region tag, so all redemption ops route to one fixed shard — keeping
+  // every operation on a given `consumeDigest` on the same single-threaded instance (atomic).
+  async tryLeaseRedemption(key: string, leaseTtlSecs: number): Promise<LeaseResult> {
+    return this.stub(REDEEM_SHARD).tryLeaseRedemption(key, leaseTtlSecs, this.maxEntries)
+  }
+
+  async commitRedemption(key: string, retentionSecs: number): Promise<void> {
+    await this.stub(REDEEM_SHARD).commitRedemption(key, retentionSecs)
+  }
+
+  async releaseRedemption(key: string): Promise<void> {
+    await this.stub(REDEEM_SHARD).releaseRedemption(key)
   }
 }

@@ -3,8 +3,28 @@
 ## What this package is
 
 The Cloudflare Workers implementation of the nft-gate gateway. Wire-identical to `gateway-rust/`
-— same routes, status codes, proof format, Sui RPC calls, and env-var config. Deployed via
-Wrangler; state backed by Durable Objects (default) or Workers KV (fallback).
+on the client-facing contract — same routes, status codes, proof format, and env-var config.
+Deployed via Wrangler; state backed by Durable Objects (default) or Workers KV (fallback).
+
+## Chain access: gRPC, not JSON-RPC
+
+`src/chain.ts` (`SuiGrpc`) queries Sui over the **gRPC** API via `@mysten/sui`'s `SuiGrpcClient`.
+Public Sui fullnodes have **deprecated JSON-RPC** — `suix_queryEvents`, `sui_getTransactionBlock`,
+and `suix_getOwnedObjects` now return `-32601 Method not found` — so the previous JSON-RPC
+`SuiRpc` returned `502 on-chain verification failed` for every gated request. `SUI_RPC_URL` keeps
+the same fullnode URL (`…:443`); only the transport changed.
+
+Single-use verification is **digest-first**: the access proof carries the `access_gate::consume`
+transaction digest, so `consumeEventMatches` fetches that exact transaction (`core.getTransaction`,
+`include: { events: true }`) and confirms it succeeded and emitted a matching `AccessConsumedEvent`
+(sender + nonce + gate). This is precise and needs no event-by-sender scan. Ownership (non
+single-use) uses `fetchAccessNfts` from `@meddleware/nft-gate-client` over the same gRPC client.
+
+The gRPC event shape differs from JSON-RPC (`eventType`/`json` vs `type`/`parsedJson`); the pure
+helpers in `chain.ts` read both so they tolerate the documented `json`-shape variation. gRPC
+`getTransaction` is retried briefly to absorb fullnode indexing lag after the client's finality
+wait. **NOTE:** `gateway-rust/` still uses JSON-RPC and must be migrated to gRPC before it can be
+deployed against a public fullnode (see the nft-gate CLAUDE.md deferred section).
 
 ## Cloudflare Workers constraints
 
@@ -56,15 +76,39 @@ may switch to the KV backend for that isolate's lifetime.
 1. Client calls `GET /v1/challenge` → receives `{ nonce, expiresAt }`.
 2. Client signs `nft-gate:access:<nonce>` as a Sui personal message.
 3. Client submits an on-chain `access_gate::consume` transaction, capturing the transaction
-   digest (`consumeDigest`).
+   digest (`consumeDigest`). It persists the digest locally so a retry/reload reuses the SAME
+   consume (re-signing a fresh challenge is free) instead of spending another use.
 4. Client sends `Authorization: Bearer base64(JSON { address, nonce, signature, consumeDigest })`
    to the gated endpoint.
-5. Gateway: decode proof → verify signature → consume nonce (single-use at gateway level) →
-   query `suix_queryEvents` for a matching `AccessConsumedEvent` → optionally verify
-   `consumeDigest` transaction directly (`sui_getTransactionBlock`) → proxy if all pass.
+5. Gateway: decode proof → verify signature → consume nonce (anti-replay) → `consumeTxValid`
+   (`core.getTransaction`: the tx succeeded and emitted an `AccessConsumedEvent` for this
+   **sender and gate**) → **lease the `consumeDigest`** → proxy → **commit** on a 2xx upstream
+   response, else **release**.
 
 If the client sends a proof without `consumeDigest` in single-use mode, it is denied with
 `ConsumeMissing` (not `BadProof`) — a distinguishable misconfiguration signal.
+
+### Redemption: the consumeDigest is the one-time token (a use is never lost)
+
+The consume event is **not** bound to the challenge nonce — the nonce is only for signature
+freshness/anti-replay. Single-use is enforced by the **redemption store** (see the state backend)
+keying on the permanent on-chain `consumeDigest`:
+
+- `tryLeaseRedemption` claims the digest for an in-flight upload (`ok` / `leased` / `redeemed`).
+- On a **successful** upload (`response.ok`) the dispatcher `commitRedemption`s it — spent, and
+  retained `REDEMPTION_RETENTION_SECS` (default 30d) to block re-redemption.
+- On **failure** it `releaseRedemption`s it, so the same consume is immediately retryable — an
+  interrupted upload (reload, tab close, wallet rejection, network blip) never burns a use.
+- A `redeemed`/`leased` lease result → `409` (`code: "redeemed"` vs `"leased"`); the client clears
+  its stored digest and consumes anew only on `redeemed`.
+
+Security: decoupling from the nonce is safe because the event `sender` must equal the
+signature-verified proof address (an attacker can't present someone else's consume; a soulbound NFT
+can't be transferred), and each digest is redeemable exactly once. The lease self-expires
+(`REDEMPTION_LEASE_TTL_SECS`, default 120s) so a crashed request can't strand a use — the rare cost
+is at most one extra upload if a worker dies between upstream success and commit. **Parity note:**
+`gateway-rust` does not yet implement redemption (or gRPC); see the nft-gate CLAUDE.md deferred
+section.
 
 ## Conformance test workflow
 

@@ -22,6 +22,10 @@ export interface Env {
   MAX_BODY_BYTES?: string
   CHALLENGE_TTL_SECS?: string
   OWNERSHIP_CACHE_TTL_MS?: string
+  /** Single-use: seconds a consume-digest redemption lease is held during an in-flight upload. */
+  REDEMPTION_LEASE_TTL_SECS?: string
+  /** Single-use: seconds a committed (spent) consume-digest is remembered to block re-redemption. */
+  REDEMPTION_RETENTION_SECS?: string
   // ── Workers-specific ──────────────────────────────────────────────────────
   /** `durable-object` (default) | `kv`. */
   NONCE_BACKEND?: string
@@ -71,6 +75,10 @@ export interface Config {
   rateLimitPerMin: number
   maxBodyBytes: number
   ownershipCacheTtlMs: number
+  /** Single-use: lease TTL (s) for an in-flight consume-digest redemption. */
+  redemptionLeaseTtlSecs: number
+  /** Single-use: retention (s) of a committed (spent) consume-digest. */
+  redemptionRetentionSecs: number
   nonceBackend: NonceBackendKind
   nonceShard: NonceShardMode
   nonceMaxEntries: number
@@ -135,6 +143,8 @@ export function loadConfig(env: Env): Config {
     rateLimitPerMin: numOr(env.RATE_LIMIT_PER_MIN, 30),
     maxBodyBytes: numOr(env.MAX_BODY_BYTES, 262144),
     ownershipCacheTtlMs: numOr(env.OWNERSHIP_CACHE_TTL_MS, 0),
+    redemptionLeaseTtlSecs: numOr(env.REDEMPTION_LEASE_TTL_SECS, 120),
+    redemptionRetentionSecs: numOr(env.REDEMPTION_RETENTION_SECS, 2592000),
     nonceBackend,
     nonceShard,
     nonceMaxEntries: numOr(env.NONCE_MAX_ENTRIES, 1000000),

@@ -68,6 +68,11 @@ for the on-chain side.
 
 Both are drop-in: same endpoints, same env vars, identical verification decisions.
 
+> **Transport divergence (2026-09):** `gateway-workers/` queries the chain over **gRPC**
+> (`@mysten/sui` `SuiGrpcClient`) because public Sui fullnodes deprecated JSON-RPC. `gateway-rust/`
+> still uses JSON-RPC and will `502` against a public fullnode until it is migrated to gRPC (see
+> Deferred). The client-facing wire contract (routes, proof format, status codes) is unchanged.
+
 ## Trust boundaries
 
 The gateway trusts:
@@ -82,6 +87,14 @@ The gateway does NOT trust:
 
 ## Deferred / post-testnet
 
+- **gateway-rust gRPC migration + redemption:** `gateway-rust/src/sui_rpc.rs` still calls
+  deprecated JSON-RPC (`suix_queryEvents`, `sui_getTransactionBlock`, `suix_getOwnedObjects`) and
+  will `502` against a public fullnode. `gateway-workers/` was migrated to gRPC (digest-first
+  consume verification via `core.getTransaction`) AND to consumeDigest-keyed single-use
+  **redemption** (lease→commit-on-success/release-on-failure, so an interrupted upload never burns
+  a use — see gateway-workers CLAUDE.md). The Rust gateway must adopt both — gRPC and the
+  redemption store (its Redis backend is the natural home for the lease/commit/release) — before it
+  can be deployed. Not blocking today — the live paywall runs on the Workers gateway.
 - **multisig / zkLogin support (audit F1):** Requires the official Sui verifier. Until then, both
   fail closed with a log warning.
 - **Redis horizontal scale-out for Workers (F2):** The KV fallback has an eventual-consistency
