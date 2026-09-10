@@ -7,7 +7,7 @@
 #   runtime  — distroless/cc: libc + CA certs; no shell or package manager
 #
 # rustls is used (no OpenSSL), so the runtime needs only libc + CA certs,
-# which distroless/cc-debian12 provides.
+# which distroless/cc-debian13 provides.
 #
 # Operators should PIN both base images by digest before deploying to production.
 # =============================================================================
@@ -30,7 +30,7 @@ COPY . .
 RUN cargo build --release && strip target/release/nft-gate-gateway
 
 # ── Runtime: minimal distroless image ────────────────────────────────────────
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 WORKDIR /app
 COPY --from=builder /src/target/release/nft-gate-gateway /app/nft-gate-gateway
 USER nonroot:nonroot

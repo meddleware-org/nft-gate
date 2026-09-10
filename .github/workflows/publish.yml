@@ -9,18 +9,19 @@ env:
   IMAGE: nft-gate-gateway
 
 jobs:
-  # ── Rust gateway: Docker image (primary deployment artifact) ────────────────
-  publish-docker-public:
-    name: Docker (quay.io + Docker Hub)
+  # ── Rust gateway: Docker image — split into per-arch native builds + merge ──
+  # Using native ubuntu-24.04-arm runners instead of QEMU emulation eliminates
+  # the 10-20x slowdown of arm64 Rust compilation under QEMU. Each leg builds
+  # only its native platform and pushes an intermediate :<sha>-<arch> tag; the
+  # merge job creates the final semver-tagged multi-arch index.
+
+  build-docker-amd64-public:
+    name: Docker amd64 (quay.io + Docker Hub)
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
-      attestations: write
     steps:
       - uses: actions/checkout@v7.0.1
-
-      - uses: docker/setup-qemu-action@v4.2.0
       - uses: docker/setup-buildx-action@v4.3.0
 
       - name: Log in to quay.io
@@ -37,7 +38,79 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Compute tags and labels
+      - name: Build and push (linux/amd64)
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: gateway-rust
+          platforms: linux/amd64
+          push: true
+          tags: |
+            quay.io/${{ vars.QUAY_NAMESPACE }}/${{ env.IMAGE }}:${{ github.sha }}-amd64
+            docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE }}:${{ github.sha }}-amd64
+          cache-from: type=gha,scope=amd64-public
+          cache-to: type=gha,scope=amd64-public,mode=max
+
+  build-docker-arm64-public:
+    name: Docker arm64 (quay.io + Docker Hub)
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Log in to quay.io
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (linux/arm64)
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: gateway-rust
+          platforms: linux/arm64
+          push: true
+          tags: |
+            quay.io/${{ vars.QUAY_NAMESPACE }}/${{ env.IMAGE }}:${{ github.sha }}-arm64
+            docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE }}:${{ github.sha }}-arm64
+          cache-from: type=gha,scope=arm64-public
+          cache-to: type=gha,scope=arm64-public,mode=max
+
+  merge-docker-public:
+    name: Merge + sign (quay.io + Docker Hub)
+    needs: [build-docker-amd64-public, build-docker-arm64-public]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Log in to quay.io
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Compute final tags and labels
         id: meta
         uses: docker/metadata-action@v6.2.0
         with:
@@ -50,25 +123,40 @@ jobs:
           flavor: |
             latest=auto
 
-      - name: Build and push (multi-arch, SBOM + provenance)
-        id: build
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: gateway-rust
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          sbom: true
-          provenance: mode=max
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Merge multi-arch manifests
+        id: merge
+        env:
+          QUAY_NS: ${{ vars.QUAY_NAMESPACE }}
+          DOCKERHUB_NS: ${{ vars.DOCKERHUB_NAMESPACE }}
+          SHA: ${{ github.sha }}
+        run: |
+          QUAY_SRC="quay.io/${QUAY_NS}/${IMAGE}:${SHA}"
+          HUB_SRC="docker.io/${DOCKERHUB_NS}/${IMAGE}:${SHA}"
+
+          # Build --tag flags from metadata output
+          QUAY_FLAGS=""
+          HUB_FLAGS=""
+          while IFS= read -r tag; do
+            if [[ "$tag" == quay.io/* ]]; then
+              QUAY_FLAGS="$QUAY_FLAGS --tag $tag"
+            elif [[ "$tag" == docker.io/* ]]; then
+              HUB_FLAGS="$HUB_FLAGS --tag $tag"
+            fi
+          done <<< "${{ steps.meta.outputs.tags }}"
+
+          docker buildx imagetools create $QUAY_FLAGS "${QUAY_SRC}-amd64" "${QUAY_SRC}-arm64"
+          docker buildx imagetools create $HUB_FLAGS   "${HUB_SRC}-amd64"  "${HUB_SRC}-arm64"
+
+          # Resolve the merged manifest digest from the primary semver tag
+          PRIMARY=$(echo "${{ steps.meta.outputs.tags }}" | grep 'quay.io' | grep -v 'latest' | head -1)
+          DIGEST=$(docker buildx imagetools inspect "${PRIMARY}" --format '{{.Manifest.Digest}}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
       - uses: sigstore/cosign-installer@v4.1.2
 
       - name: Sign images (keyless)
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.merge.outputs.digest }}
           QUAY_NS: ${{ vars.QUAY_NAMESPACE }}
           DOCKERHUB_NS: ${{ vars.DOCKERHUB_NAMESPACE }}
         run: |
@@ -77,31 +165,87 @@ jobs:
 
       - name: Attest build provenance (quay.io)
         uses: actions/attest-build-provenance@v4.2.2
+        continue-on-error: true
         with:
           subject-name: quay.io/${{ vars.QUAY_NAMESPACE }}/${{ env.IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.merge.outputs.digest }}
           push-to-registry: true
 
       - name: Attest build provenance (Docker Hub)
         uses: actions/attest-build-provenance@v4.2.2
+        continue-on-error: true
         with:
           subject-name: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.merge.outputs.digest }}
           push-to-registry: true
 
       - name: Summary
-        run: echo "Published & signed @ ${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+        run: echo "Published & signed @ ${{ steps.merge.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
 
-  publish-docker-private:
-    name: Docker (self-hosted registry)
+  # ── Self-hosted registry (best-effort) ─────────────────────────────────────
+
+  build-docker-amd64-private:
+    name: Docker amd64 (self-hosted registry)
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.3.0
 
-      - uses: docker/setup-qemu-action@v4.2.0
+      - name: Log in to self-hosted registry
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ${{ vars.PRIVATE_REGISTRY }}
+          username: ${{ secrets.PRIVATE_REGISTRY_USERNAME }}
+          password: ${{ secrets.PRIVATE_REGISTRY_TOKEN }}
+
+      - name: Build and push (linux/amd64)
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: gateway-rust
+          platforms: linux/amd64
+          push: true
+          tags: ${{ vars.PRIVATE_REGISTRY }}/${{ vars.PRIVATE_NAMESPACE }}/${{ env.IMAGE }}:${{ github.sha }}-amd64
+          cache-from: type=gha,scope=amd64-private
+          cache-to: type=gha,scope=amd64-private,mode=max
+
+  build-docker-arm64-private:
+    name: Docker arm64 (self-hosted registry)
+    runs-on: ubuntu-24.04-arm
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: docker/setup-buildx-action@v4.3.0
+
+      - name: Log in to self-hosted registry
+        uses: docker/login-action@v4.6.0
+        with:
+          registry: ${{ vars.PRIVATE_REGISTRY }}
+          username: ${{ secrets.PRIVATE_REGISTRY_USERNAME }}
+          password: ${{ secrets.PRIVATE_REGISTRY_TOKEN }}
+
+      - name: Build and push (linux/arm64)
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: gateway-rust
+          platforms: linux/arm64
+          push: true
+          tags: ${{ vars.PRIVATE_REGISTRY }}/${{ vars.PRIVATE_NAMESPACE }}/${{ env.IMAGE }}:${{ github.sha }}-arm64
+          cache-from: type=gha,scope=arm64-private
+          cache-to: type=gha,scope=arm64-private,mode=max
+
+  merge-docker-private:
+    name: Merge (self-hosted registry)
+    needs: [build-docker-amd64-private, build-docker-arm64-private]
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
       - uses: docker/setup-buildx-action@v4.3.0
 
       - name: Log in to self-hosted registry
@@ -122,18 +266,18 @@ jobs:
           flavor: |
             latest=auto
 
-      - name: Build and push
-        uses: docker/build-push-action@v7.3.0
-        with:
-          context: gateway-rust
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          sbom: true
-          provenance: mode=max
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Merge multi-arch manifests
+        env:
+          SHA: ${{ github.sha }}
+          REG: ${{ vars.PRIVATE_REGISTRY }}
+          NS: ${{ vars.PRIVATE_NAMESPACE }}
+        run: |
+          SRC="${REG}/${NS}/${IMAGE}:${SHA}"
+          FLAGS=""
+          while IFS= read -r tag; do
+            FLAGS="$FLAGS --tag $tag"
+          done <<< "${{ steps.meta.outputs.tags }}"
+          docker buildx imagetools create $FLAGS "${SRC}-amd64" "${SRC}-arm64"
 
   # ── Rust gateway: crates.io (cargo install distribution) ───────────────────
   publish-crates:
@@ -173,12 +317,14 @@ jobs:
 
   # ── Workers gateway: npmjs (source-distribution for forkers) ───────────────
   # Uses OIDC trusted publisher — no static NPM_TOKEN secret required.
-  # Configure this package as a trusted publisher on npmjs.com before enabling
-  # the automated path. Until then, publish manually before pushing the tag and
-  # the version-check will skip this step cleanly.
+  # IMPORTANT: configure @meddleware/nft-gate-gateway as a Trusted Publisher on
+  # npmjs.com (repo: meddleware-org/nft-gate, workflow: publish.yml) before
+  # removing continue-on-error. Until then, publish manually before pushing the
+  # tag — the version-check will skip cleanly once npm's CDN propagates.
   publish-npm:
     name: npmjs (@meddleware/nft-gate-gateway)
     runs-on: ubuntu-latest
+    continue-on-error: true
     permissions:
       contents: read
       id-token: write   # required for OIDC trusted publisher exchange
