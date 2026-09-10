@@ -42,16 +42,19 @@ export async function forward(cfg: Config, request: Request): Promise<Response> 
   const pathAndQuery = url.pathname + url.search
   const upstreamUrl = cfg.upstreamUrl + pathAndQuery
 
-  // Read + cap the body (a griefing guard) before forwarding.
-  let body: ArrayBuffer | undefined
+  // Size guard: check Content-Length first (cheap, avoids buffering). Not authoritative
+  // (clients can lie) but protects against accidental oversized sends; the relay enforces
+  // its own hard limit. Stream the body directly — buffering 60+ MB encoded blobs into an
+  // ArrayBuffer would exhaust Worker memory for large Walrus uploads.
   const method = request.method.toUpperCase()
   if (method !== 'GET' && method !== 'HEAD') {
-    const buf = await request.arrayBuffer()
-    if (buf.byteLength > cfg.maxBodyBytes) {
+    const cl = parseInt(request.headers.get('content-length') ?? '', 10)
+    if (Number.isFinite(cl) && cl > cfg.maxBodyBytes) {
       return errorResponse(413, 'request body too large')
     }
-    body = buf
   }
+  const body: ReadableStream | null | undefined =
+    method !== 'GET' && method !== 'HEAD' ? request.body : undefined
 
   const headers = new Headers(request.headers)
   headers.delete('host')
@@ -66,7 +69,13 @@ export async function forward(cfg: Config, request: Request): Promise<Response> 
 
   let upstream: Response
   try {
-    upstream = await fetch(upstreamUrl, { method: request.method, headers, body })
+    upstream = await fetch(upstreamUrl, {
+      method: request.method,
+      headers,
+      body: body ?? null,
+      // @ts-expect-error — CF Workers supports streaming body via ReadableStream without 'duplex'
+      duplex: 'half',
+    })
   } catch {
     return errorResponse(502, 'upstream error')
   }
