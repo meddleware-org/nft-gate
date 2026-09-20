@@ -1,183 +1,161 @@
-//! Production [`ChainQuery`] implementation over Sui JSON-RPC (`suix_getOwnedObjects`,
-//! `suix_queryEvents`, `sui_getTransactionBlock`). The RPC round-trips are not unit-tested
-//! (network-dependent) — covered by the localnet integration loop; the pure match/parse
-//! helpers are unit-tested.
+//! Production [`ChainQuery`] implementation over the Sui **gRPC** API (`sui.rpc.v2`), via the
+//! hand-rolled gRPC-web client in [`crate::grpc`] (no `tonic`/`prost`). Public JSON-RPC is
+//! deprecated; this replaces it. The pure response-parse helpers are unit-tested; the network
+//! round-trips are covered by the localnet/integration loop.
+//!
+//! Single-use verification is **digest-first**, mirroring the Workers gateway: the proof carries
+//! the `access_gate::consume` transaction digest, so we fetch that transaction and confirm it
+//! emitted an `AccessConsumedEvent` for this sender + gate. It is NOT bound to the challenge nonce,
+//! so an interrupted upload can resume with a fresh challenge while reusing the same consume.
 
+use crate::grpc::{field_bytes, field_str, value_find_string, Field, GrpcWeb, ProtoReader, ProtoWriter};
 use crate::http_client::HttpClient;
 use crate::verify::ChainQuery;
-use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+// ── pinned sui.rpc.v2 field numbers (validated against live responses) ───────────────────────
+const LEDGER_GET_TRANSACTION: &str = "sui.rpc.v2.LedgerService/GetTransaction";
+const STATE_LIST_OWNED_OBJECTS: &str = "sui.rpc.v2.StateService/ListOwnedObjects";
+
+// GetTransactionRequest { digest = 1; FieldMask read_mask = 2 { repeated string paths = 1 } }
+const REQ_DIGEST: u32 = 1;
+const REQ_READ_MASK: u32 = 2;
+const FIELDMASK_PATHS: u32 = 1;
+// GetTransactionResponse { ExecutedTransaction transaction = 1 }
+const RESP_TRANSACTION: u32 = 1;
+// ExecutedTransaction { ... TransactionEvents events = 5 }
+const EXECUTED_EVENTS: u32 = 5;
+// TransactionEvents { ... repeated Event events = 3 }
+const EVENTS_EVENTS: u32 = 3;
+// Event { package_id=1; module=2; sender=3; event_type=4; Bcs contents=5; Value json=6 }
+const EVENT_SENDER: u32 = 3;
+const EVENT_TYPE: u32 = 4;
+const EVENT_JSON: u32 = 6;
+
+// ListOwnedObjectsRequest { owner=1; uint32 page_size=2; FieldMask read_mask=4; object_type=5 }
+const LOO_OWNER: u32 = 1;
+const LOO_PAGE_SIZE: u32 = 2;
+const LOO_READ_MASK: u32 = 4;
+const LOO_OBJECT_TYPE: u32 = 5;
+// ListOwnedObjectsResponse { repeated Object objects = 1 }
+const LOO_OBJECTS: u32 = 1;
+// Object { ... Value json = 100 }
+const OBJECT_JSON: u32 = 100;
+
 /// A cached result of an ownership query.
 struct CacheEntry {
-    /// Whether the address owned the NFT at query time.
     owns: bool,
-    /// Monotonic expiry; stale entries are ignored and refreshed on next access.
     expiry: Instant,
 }
 
-/// Production [`ChainQuery`] implementation backed by Sui JSON-RPC.
+/// Production [`ChainQuery`] backed by the Sui gRPC API (gRPC-web transport).
 pub struct SuiRpc {
-    /// Shared HTTP client for all RPC calls.
-    client: HttpClient,
-    /// Sui JSON-RPC endpoint URL.
-    rpc_url: String,
-    /// Ownership-cache TTL. 0 = disabled (every gated check is live on-chain).
+    grpc: GrpcWeb,
     cache_ttl: Duration,
-    /// Optional ownership cache, keyed by `address|nft_type|gate_id`.
     cache: Mutex<HashMap<String, CacheEntry>>,
 }
 
 impl SuiRpc {
-    /// Create a new `SuiRpc` client. Set `cache_ttl_ms` to `0` to disable the ownership cache
-    /// (the default — every gated check hits the RPC live).
+    /// Create a new client. `rpc_url` is the full-node origin (gRPC-web is served there). Set
+    /// `cache_ttl_ms` to `0` to disable the ownership cache (default — every gated check is live).
     pub fn new(client: HttpClient, rpc_url: String, cache_ttl_ms: u64) -> Self {
         Self {
-            client,
-            rpc_url,
+            grpc: GrpcWeb::new(client, rpc_url),
             cache_ttl: Duration::from_millis(cache_ttl_ms),
             cache: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Send a JSON-RPC request to the configured endpoint and return the `result` field.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error on HTTP failure, JSON parse failure, or if the RPC response contains an
-    /// `error` field.
-    async fn call(&self, method: &str, params: Value) -> anyhow::Result<Value> {
-        let body = json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
-        let resp = self.client.post_json(&self.rpc_url, &body).await?;
-        if let Some(err) = resp.get("error") {
-            anyhow::bail!("rpc error from {method}: {err}");
-        }
-        Ok(resp.get("result").cloned().unwrap_or(Value::Null))
-    }
-
-    /// Derive the package id from a `<pkg>::module::Type` string.
-    fn package_of(nft_type: &str) -> Option<&str> {
-        nft_type.split("::").next()
-    }
-
-    /// Build a stable cache key from the three ownership-query parameters.
     fn cache_key(address: &str, nft_type: &str, gate_id: Option<&str>) -> String {
         format!("{address}|{nft_type}|{}", gate_id.unwrap_or("-"))
     }
 
-    /// The uncached, live ownership query.
+    /// Uncached, live ownership query via `StateService/ListOwnedObjects`.
     async fn owns_nft_live(
         &self,
         address: &str,
         nft_type: &str,
         gate_id: Option<&str>,
     ) -> anyhow::Result<bool> {
-        let params = json!([
-            address,
-            { "filter": { "StructType": nft_type }, "options": { "showContent": true } },
-            null,
-            50
-        ]);
-        let result = self.call("suix_getOwnedObjects", params).await?;
-        let empty = vec![];
-        let data = result
-            .get("data")
-            .and_then(|d| d.as_array())
-            .unwrap_or(&empty);
-        if gate_id.is_none() {
-            return Ok(!data.is_empty());
-        }
-        let want = gate_id.unwrap();
-        Ok(data.iter().any(|entry| {
-            entry
-                .pointer("/data/content/fields/data/fields/gate_id")
-                .and_then(|v| v.as_str())
-                == Some(want)
-        }))
-    }
-
-    /// Directly verify the `consume` transaction named by `digest`: it must have executed and
-    /// emitted an `AccessConsumedEvent` matching `nonce` (and `gate_id`), sent by `address`.
-    /// Defence-in-depth atop the sender+nonce event query.
-    async fn consume_tx_matches(
-        &self,
-        digest: &str,
-        nonce: &str,
-        address: &str,
-        gate_id: Option<&str>,
-    ) -> anyhow::Result<bool> {
-        let params = json!([digest, { "showEvents": true, "showEffects": true }]);
-        let result = self.call("sui_getTransactionBlock", params).await?;
-        // Must have succeeded.
-        let status_ok = result
-            .pointer("/effects/status/status")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "success")
-            .unwrap_or(false);
-        if !status_ok {
-            return Ok(false);
-        }
-        let empty = vec![];
-        let events = result
-            .get("events")
-            .and_then(|e| e.as_array())
-            .unwrap_or(&empty);
-        Ok(events
-            .iter()
-            .any(|ev| is_consumed_event(ev) && event_matches(ev, nonce, address, gate_id)))
+        let mut mask = ProtoWriter::new();
+        mask.string_field(FIELDMASK_PATHS, "object_type");
+        mask.string_field(FIELDMASK_PATHS, "json");
+        let mut req = ProtoWriter::new();
+        req.string_field(LOO_OWNER, address);
+        req.uint_field(LOO_PAGE_SIZE, 50);
+        req.bytes_field(LOO_READ_MASK, &mask.into_bytes());
+        req.string_field(LOO_OBJECT_TYPE, nft_type);
+        let resp = self.grpc.call(STATE_LIST_OWNED_OBJECTS, req.into_bytes()).await?;
+        Ok(response_has_owned(&resp, gate_id))
     }
 }
 
-/// True if the event's type is an `access_gate::AccessConsumedEvent`.
-fn is_consumed_event(ev: &Value) -> bool {
-    ev.get("type")
-        .and_then(|v| v.as_str())
-        .map(|t| t.ends_with("::access_gate::AccessConsumedEvent"))
-        .unwrap_or(false)
+/// Build the `GetTransactionRequest` for `digest`, requesting only the events.
+fn build_get_transaction(digest: &str) -> Vec<u8> {
+    let mut mask = ProtoWriter::new();
+    mask.string_field(FIELDMASK_PATHS, "events");
+    let mut req = ProtoWriter::new();
+    req.string_field(REQ_DIGEST, digest);
+    req.bytes_field(REQ_READ_MASK, &mask.into_bytes());
+    req.into_bytes()
 }
 
-/// UTF-8 bytes of `nonce`, as the on-chain `AccessConsumedEvent.nonce` (a `vector<u8>`) is
-/// rendered by RPC — usually an array of byte numbers, sometimes base64.
-fn nonce_matches(event_nonce: &Value, nonce: &str) -> bool {
-    let want: Vec<u64> = nonce.as_bytes().iter().map(|b| *b as u64).collect();
-    match event_nonce {
-        Value::Array(arr) => {
-            arr.len() == want.len()
-                && arr
-                    .iter()
-                    .zip(want.iter())
-                    .all(|(a, w)| a.as_u64() == Some(*w))
-        }
-        Value::String(s) => {
-            use base64::prelude::*;
-            BASE64_STANDARD
-                .decode(s)
-                .map(|d| d == nonce.as_bytes())
-                .unwrap_or(false)
-        }
-        _ => false,
-    }
-}
-
-/// Does a single event match this challenge: sender == address, nonce matches, and (if given)
-/// gate_id matches. (When the query is already sender-filtered the sender check is redundant
-/// but kept as defence in depth.)
-fn event_matches(ev: &Value, nonce: &str, address: &str, gate_id: Option<&str>) -> bool {
-    let sender_ok = ev.get("sender").and_then(|v| v.as_str()) == Some(address);
-    let nonce_ok = ev
-        .pointer("/parsedJson/nonce")
-        .map(|v| nonce_matches(v, nonce))
-        .unwrap_or(false);
-    let gate_ok = match gate_id {
-        Some(g) => ev.pointer("/parsedJson/gate_id").and_then(|v| v.as_str()) == Some(g),
-        None => true,
+/// True if a `GetTransactionResponse` contains an `AccessConsumedEvent` sent by `address` for
+/// `gate_id` (when constrained). A failed transaction emits no events, so the presence of a
+/// matching event already implies success — no separate status check is needed.
+fn response_has_consume(resp: &[u8], address: &str, gate_id: Option<&str>) -> bool {
+    let Some(tx) = field_bytes(resp, RESP_TRANSACTION) else {
+        return false;
     };
-    sender_ok && nonce_ok && gate_ok
+    let Some(events) = field_bytes(tx, EXECUTED_EVENTS) else {
+        return false;
+    };
+    for f in ProtoReader::new(events) {
+        let Field::Len(EVENTS_EVENTS, ev) = f else {
+            continue;
+        };
+        let is_consume = field_str(ev, EVENT_TYPE)
+            .map(|t| t.ends_with("::access_gate::AccessConsumedEvent"))
+            .unwrap_or(false);
+        if !is_consume || field_str(ev, EVENT_SENDER) != Some(address) {
+            continue;
+        }
+        match gate_id {
+            None => return true,
+            Some(g) => {
+                let json = field_bytes(ev, EVENT_JSON).unwrap_or(&[]);
+                if value_find_string(json, "gate_id").as_deref() == Some(g) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
-// `ChainQuery` implementation for `SuiRpc` — production on-chain lookups via Sui JSON-RPC.
+/// True if a `ListOwnedObjectsResponse` contains an owned object matching `gate_id` (when
+/// constrained). The object type is already constrained by the request's `object_type` filter, so
+/// with no gate constraint any returned object means ownership.
+fn response_has_owned(resp: &[u8], gate_id: Option<&str>) -> bool {
+    for f in ProtoReader::new(resp) {
+        let Field::Len(LOO_OBJECTS, obj) = f else {
+            continue;
+        };
+        match gate_id {
+            None => return true,
+            Some(g) => {
+                let json = field_bytes(obj, OBJECT_JSON).unwrap_or(&[]);
+                if value_find_string(json, "gate_id").as_deref() == Some(g) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 impl ChainQuery for SuiRpc {
     async fn owns_nft(
         &self,
@@ -185,8 +163,7 @@ impl ChainQuery for SuiRpc {
         nft_type: &str,
         gate_id: Option<&str>,
     ) -> anyhow::Result<bool> {
-        // Cache is OFF by default (cache_ttl == 0) so a gated action is confirmed live. When
-        // the operator opts into a small TTL, collapse duplicate lookups within that window.
+        // Cache is OFF by default (cache_ttl == 0) so a gated action is confirmed live.
         if !self.cache_ttl.is_zero() {
             let key = Self::cache_key(address, nft_type, gate_id);
             if let Some(e) = self.cache.lock().unwrap().get(&key) {
@@ -207,91 +184,124 @@ impl ChainQuery for SuiRpc {
         self.owns_nft_live(address, nft_type, gate_id).await
     }
 
-    async fn consume_event_matches(
+    async fn consume_tx_valid(
         &self,
-        nonce: &str,
+        consume_digest: &str,
         address: &str,
-        nft_type: &str,
         gate_id: Option<&str>,
-        consume_digest: Option<&str>,
     ) -> anyhow::Result<bool> {
-        let pkg = Self::package_of(nft_type)
-            .ok_or_else(|| anyhow::anyhow!("cannot derive package from nft_type"))?;
-        let event_type = format!("{pkg}::access_gate::AccessConsumedEvent");
-        // F5: filter by BOTH the event type AND the emitting Sender, so the scan is O(this
-        // user's consume events) rather than a flat recent-N over all users.
-        let params = json!([
-            { "All": [ { "MoveEventType": event_type }, { "Sender": address } ] },
-            null,
-            50,
-            true // descending: most recent first
-        ]);
-        let result = self.call("suix_queryEvents", params).await?;
-        let empty = vec![];
-        let data = result
-            .get("data")
-            .and_then(|d| d.as_array())
-            .unwrap_or(&empty);
-        let primary = data
-            .iter()
-            .any(|ev| event_matches(ev, nonce, address, gate_id));
-        if !primary {
-            return Ok(false);
-        }
-        // F4: if a consume tx digest was supplied, verify that exact transaction too.
-        if let Some(digest) = consume_digest {
-            return self
-                .consume_tx_matches(digest, nonce, address, gate_id)
-                .await;
-        }
-        Ok(true)
+        let resp = self
+            .grpc
+            .call(LEDGER_GET_TRANSACTION, build_get_transaction(consume_digest))
+            .await?;
+        Ok(response_has_consume(&resp, address, gate_id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use crate::grpc::ProtoWriter;
+
+    // google.protobuf.Value { string_value=3; struct_value=5 } / Struct { fields=1 { key=1; value=2 } }
+    fn json_gate(gate: &str) -> Vec<u8> {
+        let mut val = ProtoWriter::new();
+        val.string_field(3, gate); // string_value
+        let mut entry = ProtoWriter::new();
+        entry.string_field(1, "gate_id");
+        entry.bytes_field(2, &val.into_bytes());
+        let mut s = ProtoWriter::new();
+        s.bytes_field(1, &entry.into_bytes());
+        let mut value = ProtoWriter::new();
+        value.bytes_field(5, &s.into_bytes()); // struct_value
+        value.into_bytes()
+    }
+
+    fn event(etype: &str, sender: &str, gate: &str) -> Vec<u8> {
+        let mut ev = ProtoWriter::new();
+        ev.string_field(3, sender); // sender
+        ev.string_field(4, etype); // event_type
+        ev.bytes_field(6, &json_gate(gate)); // json
+        ev.into_bytes()
+    }
+
+    /// Build a GetTransactionResponse { transaction { events { events: [event...] } } }.
+    fn tx_response(events: &[Vec<u8>]) -> Vec<u8> {
+        let mut te = ProtoWriter::new();
+        for e in events {
+            te.bytes_field(EVENTS_EVENTS, e);
+        }
+        let mut tx = ProtoWriter::new();
+        tx.bytes_field(EXECUTED_EVENTS, &te.into_bytes());
+        let mut resp = ProtoWriter::new();
+        resp.bytes_field(RESP_TRANSACTION, &tx.into_bytes());
+        resp.into_bytes()
+    }
+
+    const CONSUMED: &str = "0xpkg::access_gate::AccessConsumedEvent";
 
     #[test]
-    fn nonce_matches_byte_array() {
-        assert!(nonce_matches(&json!([110, 111, 110, 99, 101]), "nonce"));
-        assert!(!nonce_matches(&json!([1, 2, 3]), "nonce"));
+    fn matches_a_valid_consume_for_sender_and_gate() {
+        let resp = tx_response(&[event(CONSUMED, "0xowner", "0xgate")]);
+        assert!(response_has_consume(&resp, "0xowner", Some("0xgate")));
+        assert!(response_has_consume(&resp, "0xowner", None));
     }
 
     #[test]
-    fn nonce_matches_base64() {
-        use base64::prelude::*;
-        let b64 = BASE64_STANDARD.encode("nonce");
-        assert!(nonce_matches(&json!(b64), "nonce"));
+    fn rejects_wrong_sender_gate_or_event_type() {
+        let resp = tx_response(&[event(CONSUMED, "0xowner", "0xgate")]);
+        assert!(!response_has_consume(&resp, "0xattacker", Some("0xgate"))); // wrong sender
+        assert!(!response_has_consume(&resp, "0xowner", Some("0xwrong"))); // wrong gate
+        let other = tx_response(&[event("0xpkg::access_gate::PurchasedEvent", "0xowner", "0xgate")]);
+        assert!(!response_has_consume(&other, "0xowner", Some("0xgate"))); // wrong event type
     }
 
     #[test]
-    fn package_of_extracts_prefix() {
-        assert_eq!(
-            SuiRpc::package_of("0xabc::access_gate::AccessNFT"),
-            Some("0xabc")
+    fn rejects_when_no_events() {
+        assert!(!response_has_consume(&tx_response(&[]), "0xowner", Some("0xgate")));
+        assert!(!response_has_consume(&[], "0xowner", None)); // empty/failed tx
+    }
+
+    #[test]
+    fn owned_response_matches_gate() {
+        // ListOwnedObjectsResponse { objects: [ Object { json } ] }
+        let mut obj = ProtoWriter::new();
+        obj.bytes_field(OBJECT_JSON, &json_gate("0xgate"));
+        let mut resp = ProtoWriter::new();
+        resp.bytes_field(LOO_OBJECTS, &obj.into_bytes());
+        let bytes = resp.into_bytes();
+        assert!(response_has_owned(&bytes, Some("0xgate")));
+        assert!(response_has_owned(&bytes, None));
+        assert!(!response_has_owned(&bytes, Some("0xother")));
+        assert!(!response_has_owned(&[], Some("0xgate")));
+    }
+
+    #[test]
+    fn build_get_transaction_encodes_digest_and_mask() {
+        let req = build_get_transaction("DIGEST123");
+        assert_eq!(field_str(&req, REQ_DIGEST), Some("DIGEST123"));
+        let mask = field_bytes(&req, REQ_READ_MASK).unwrap();
+        assert_eq!(field_str(mask, FIELDMASK_PATHS), Some("events"));
+    }
+
+    // Live end-to-end check against Sui testnet — the Rust analogue of the Workers real-chain
+    // harness. Ignored by default (network); run with `cargo test -- --ignored`. Uses a known
+    // on-chain `access_gate::consume` transaction.
+    #[tokio::test]
+    #[ignore = "hits Sui testnet gRPC; run with --ignored"]
+    async fn live_consume_tx_valid() {
+        use crate::http_client::HttpClient;
+        use crate::verify::ChainQuery;
+        let rpc = SuiRpc::new(
+            HttpClient::new().unwrap(),
+            "https://fullnode.testnet.sui.io:443".to_string(),
+            0,
         );
-    }
-
-    #[test]
-    fn event_matches_checks_sender_nonce_gate() {
-        let ev = json!({
-            "type": "0xabc::access_gate::AccessConsumedEvent",
-            "sender": "0xowner",
-            "parsedJson": { "nonce": [110, 111, 110, 99, 101], "gate_id": "0xgate" }
-        });
-        assert!(is_consumed_event(&ev));
-        assert!(event_matches(&ev, "nonce", "0xowner", Some("0xgate")));
-        assert!(!event_matches(&ev, "nonce", "0xattacker", Some("0xgate"))); // wrong sender
-        assert!(!event_matches(&ev, "other", "0xowner", Some("0xgate"))); // wrong nonce
-        assert!(!event_matches(&ev, "nonce", "0xowner", Some("0xwrong"))); // wrong gate
-        assert!(event_matches(&ev, "nonce", "0xowner", None)); // gate not constrained
-    }
-
-    #[test]
-    fn cache_key_is_stable() {
-        assert_eq!(SuiRpc::cache_key("0xa", "0xt", Some("0xg")), "0xa|0xt|0xg");
-        assert_eq!(SuiRpc::cache_key("0xa", "0xt", None), "0xa|0xt|-");
+        let digest = "BbsLUnQGoWSDg6Kd1Hy8vGnyotJtz4hcp45sMv7cGHwU";
+        let addr = "0xe6b2810abfc5a6f37a375f73e3ba76cfc37584196e453255ad3c9ca2f0ede0ed";
+        let gate = "0x0485c1fa80e4c355c85ab99c0281a328d8fb5c60ac50ab64f10be0f8be792aba";
+        assert!(rpc.consume_tx_valid(digest, addr, Some(gate)).await.unwrap());
+        assert!(!rpc.consume_tx_valid(digest, "0x01", Some(gate)).await.unwrap());
+        assert!(!rpc.consume_tx_valid(digest, addr, Some("0xdead")).await.unwrap());
     }
 }

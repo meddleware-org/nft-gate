@@ -49,6 +49,10 @@ GATE_ID = "0x0485c1fa80e4c355c85ab99c0281a328d8fb5c60ac50ab64f10be0f8be792aba"
 SINGLE_USE = "true"
 PUBLIC_PATHS = "/v1/tip-config"
 RATE_LIMIT_PER_MIN = "30"
+# Unauthenticated public paths (/v1/tip-config) are protected separately: a higher per-client-IP
+# request ceiling (cheap GETs) plus an edge cache so floods are absorbed before reaching the relay.
+PUBLIC_RATE_LIMIT_PER_MIN = "120"
+PUBLIC_CACHE_TTL_SECS = "60"
 MAX_BODY_BYTES = "104857600"
 CHALLENGE_TTL_SECS = "300"
 OWNERSHIP_CACHE_TTL_MS = "0"
@@ -64,6 +68,9 @@ NONCE_BACKEND = "durable-object" # "durable-object" (default) | "kv"
 NONCE_SHARD = "region"           # "region" (default) | "global"
 NONCE_MAX_ENTRIES = "1000000"
 QUOTA_GUARD_ENABLED = "false"
+# Comma-separated list of browser origins allowed to make cross-origin requests.
+# Only these origins receive Access-Control-Allow-Origin in responses.
+ALLOWED_ORIGINS = "https://sui-walrus.meddleware.co.uk,https://sui.meddleware.co.uk"
 
 # ── nonce store + rate limiter: region-sharded, SQLite-backed Durable Objects (free-tier) ────
 [[durable_objects.bindings]]

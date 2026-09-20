@@ -13,6 +13,17 @@
       "signature": "s"
     }
   },
+  "addressNormalization": {
+    "description": "Both gateways canonicalise the proof address (normalizeAddress / normalize_address) before comparing to on-chain owners: strip 0x, lower-case, zero-pad to 64 hex, re-prefix 0x. Static cases (no keypair).",
+    "cases": [
+      { "input": "0x1", "expected": "0x0000000000000000000000000000000000000000000000000000000000000001" },
+      { "input": "0xABCDEF", "expected": "0x0000000000000000000000000000000000000000000000000000000000abcdef" },
+      {
+        "input": "0x0000000000000000000000000000000000000000000000000000000000000123",
+        "expected": "0x0000000000000000000000000000000000000000000000000000000000000123"
+      }
+    ]
+  },
   "signatures": [
     {
       "scheme": "ed25519",

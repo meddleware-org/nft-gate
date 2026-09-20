@@ -1,16 +1,20 @@
 import { describe, it, expect } from 'vitest'
-import { env } from 'cloudflare:test'
+import { env, createExecutionContext } from 'cloudflare:test'
 import worker from '../src/index.js'
 import type { Env } from '../src/config.js'
 
 const e = env as unknown as Env
 
+const ALLOWED_ORIGIN = 'https://allowed.example.com'
+const DISALLOWED_ORIGIN = 'https://evil.example.com'
+
 async function call(method: string, path: string, headers?: Record<string, string>): Promise<Response> {
-  return worker.fetch(new Request('https://gw.example.com' + path, { method, headers }), e)
+  return worker.fetch(new Request('https://gw.example.com' + path, { method, headers }), e, createExecutionContext())
 }
 
-function hasCors(res: Response): boolean {
-  return res.headers.get('access-control-allow-origin') === '*'
+/** Returns the reflected ACAO header value (null if absent). */
+function corsOrigin(res: Response): string | null {
+  return res.headers.get('access-control-allow-origin')
 }
 
 // Routing parity with main.rs (paths that don't require the upstream or a live RPC).
@@ -43,30 +47,41 @@ describe('router', () => {
     expect(await res.json()).toEqual({ error: 'malformed access proof' })
   })
 
-  it('OPTIONS /v1/challenge → 204 preflight with CORS headers', async () => {
-    const res = await call('OPTIONS', '/v1/challenge')
+  it('OPTIONS /v1/challenge → 204 preflight with CORS headers for allowed origin', async () => {
+    const res = await call('OPTIONS', '/v1/challenge', { origin: ALLOWED_ORIGIN })
     expect(res.status).toBe(204)
-    expect(hasCors(res)).toBe(true)
+    expect(corsOrigin(res)).toBe(ALLOWED_ORIGIN)
     expect(res.headers.get('access-control-allow-methods')).toContain('GET')
     expect(res.headers.get('access-control-allow-headers')).toContain('authorization')
   })
 
-  it('OPTIONS /v1/store → 204 preflight with CORS headers', async () => {
-    const res = await call('OPTIONS', '/v1/store')
+  it('OPTIONS /v1/store → 204 preflight with CORS headers for allowed origin', async () => {
+    const res = await call('OPTIONS', '/v1/store', { origin: ALLOWED_ORIGIN })
     expect(res.status).toBe(204)
-    expect(hasCors(res)).toBe(true)
+    expect(corsOrigin(res)).toBe(ALLOWED_ORIGIN)
   })
 
-  it('GET /v1/challenge → has Access-Control-Allow-Origin', async () => {
-    const res = await call('GET', '/v1/challenge')
+  it('GET /v1/challenge → reflects allowed origin', async () => {
+    const res = await call('GET', '/v1/challenge', { origin: ALLOWED_ORIGIN })
     expect(res.status).toBe(200)
-    expect(hasCors(res)).toBe(true)
+    expect(corsOrigin(res)).toBe(ALLOWED_ORIGIN)
   })
 
-  it('401 missing proof → has Access-Control-Allow-Origin', async () => {
-    const res = await call('POST', '/v1/blob-upload')
+  it('401 missing proof → reflects allowed origin', async () => {
+    const res = await call('POST', '/v1/blob-upload', { origin: ALLOWED_ORIGIN })
     expect(res.status).toBe(401)
-    expect(hasCors(res)).toBe(true)
+    expect(corsOrigin(res)).toBe(ALLOWED_ORIGIN)
+  })
+
+  it('CORS: disallowed origin receives no Access-Control-Allow-Origin header', async () => {
+    const res = await call('GET', '/v1/challenge', { origin: DISALLOWED_ORIGIN })
+    expect(corsOrigin(res)).toBeNull()
+    expect(res.headers.get('access-control-allow-methods')).toContain('GET')
+  })
+
+  it('CORS: request without Origin header receives no Access-Control-Allow-Origin header', async () => {
+    const res = await call('GET', '/v1/challenge')
+    expect(corsOrigin(res)).toBeNull()
   })
 
   it('challenge → sign is a full round trip the nonce store accepts once', async () => {

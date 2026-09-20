@@ -68,10 +68,11 @@ for the on-chain side.
 
 Both are drop-in: same endpoints, same env vars, identical verification decisions.
 
-> **Transport divergence (2026-09):** `gateway-workers/` queries the chain over **gRPC**
-> (`@mysten/sui` `SuiGrpcClient`) because public Sui fullnodes deprecated JSON-RPC. `gateway-rust/`
-> still uses JSON-RPC and will `502` against a public fullnode until it is migrated to gRPC (see
-> Deferred). The client-facing wire contract (routes, proof format, status codes) is unchanged.
+> **Transport (2026-09):** both gateways query the chain over **gRPC** (public Sui fullnodes
+> deprecated JSON-RPC). `gateway-workers/` uses `@mysten/sui`'s `SuiGrpcClient`; `gateway-rust/`
+> uses a hand-rolled gRPC-web client (`grpc.rs`, no `tonic`/`prost`) to keep its lightweight build.
+> Both are digest-first for single-use and implement consumeDigest **redemption** (a consumed use is
+> never lost). The client-facing wire contract (routes, proof format, status codes) is unchanged.
 
 ## Trust boundaries
 
@@ -87,14 +88,12 @@ The gateway does NOT trust:
 
 ## Deferred / post-testnet
 
-- **gateway-rust gRPC migration + redemption:** `gateway-rust/src/sui_rpc.rs` still calls
-  deprecated JSON-RPC (`suix_queryEvents`, `sui_getTransactionBlock`, `suix_getOwnedObjects`) and
-  will `502` against a public fullnode. `gateway-workers/` was migrated to gRPC (digest-first
-  consume verification via `core.getTransaction`) AND to consumeDigest-keyed single-use
-  **redemption** (lease→commit-on-success/release-on-failure, so an interrupted upload never burns
-  a use — see gateway-workers CLAUDE.md). The Rust gateway must adopt both — gRPC and the
-  redemption store (its Redis backend is the natural home for the lease/commit/release) — before it
-  can be deployed. Not blocking today — the live paywall runs on the Workers gateway.
+- **gateway-rust gRPC migration + redemption — DONE (2026-09):** `gateway-rust/` now queries the
+  chain over hand-rolled gRPC-web (`grpc.rs`) with digest-first single-use verification and the
+  consumeDigest **redemption** store (`NonceStore` lease/commit/release, `main.rs` orchestration),
+  at parity with `gateway-workers/`. Validated by `cargo test` + a live testnet check
+  (`sui_rpc::tests::live_consume_tx_valid`, `--ignored`). It is buildable/deployable but not
+  currently deployed — the live paywall still runs on the Workers gateway.
 - **multisig / zkLogin support (audit F1):** Requires the official Sui verifier. Until then, both
   fail closed with a log warning.
 - **Redis horizontal scale-out for Workers (F2):** The KV fallback has an eventual-consistency
@@ -107,3 +106,25 @@ The gateway does NOT trust:
 - Do not add custom auth flows — the whole point is the wire protocol is canonical.
 - Do not skip conformance vector tests when changing signature verification.
 - Do not hardcode secrets — all config is env-var / wrangler secrets.
+
+---
+
+## Deferred documentation — NOT for the `docs.` website (planned here per Part 0.4)
+
+> The gateway is inherently developer/operator infrastructure, so most of this repo's docs are
+> already `dev.`-scoped. None of it belongs on the user-facing `docs.` site — an end user buying a
+> gate pass never sees the gateway. The material below is the `dev.`/self-host outline to formalise
+> later; it is largely already captured above (gateway selection, wire protocol, conformance,
+> trust boundaries) and should be transcribed rather than rediscovered.
+
+### `dev.` / self-host (to formalise later)
+
+- **Deploy guides** for both impls (Workers via Wrangler; Rust via Docker/k8s + Redis), the shared
+  env-var/secrets surface, `PUBLIC_PATHS`, and the gRPC `SUI_RPC_URL` requirement.
+- **Wire-protocol spec + conformance vectors** as the canonical integration contract (shared with
+  `@meddleware/nft-gate-client`).
+
+### White-label
+
+- Placing an operator's **own upstream** (relay, website, game API) behind the gateway; how gate
+  ownership maps to access, with commission fixed on-chain by `access_gate` (never in the gateway).

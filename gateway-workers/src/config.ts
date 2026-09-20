@@ -19,6 +19,8 @@ export interface Env {
   SINGLE_USE?: string
   PUBLIC_PATHS?: string
   RATE_LIMIT_PER_MIN?: string
+  PUBLIC_RATE_LIMIT_PER_MIN?: string
+  PUBLIC_CACHE_TTL_SECS?: string
   MAX_BODY_BYTES?: string
   CHALLENGE_TTL_SECS?: string
   OWNERSHIP_CACHE_TTL_MS?: string
@@ -47,6 +49,13 @@ export interface Env {
   UPSTREAM_AUTH_HEADERS?: string
   /** `true` enables the scheduled quota guard. */
   QUOTA_GUARD_ENABLED?: string
+  /**
+   * Comma-separated list of browser origins allowed to make cross-origin requests.
+   * Only origins in this list receive an `Access-Control-Allow-Origin` header.
+   * Defaults to the two Meddleware app origins when absent.
+   * Example: `"https://sui-walrus.meddleware.co.uk,https://sui.meddleware.co.uk"`
+   */
+  ALLOWED_ORIGINS?: string
   // ── bindings ──────────────────────────────────────────────────────────────
   NONCE_STATE?: DurableObjectNamespace
   NONCE_KV?: KVNamespace
@@ -73,6 +82,10 @@ export interface Config {
   singleUse: boolean
   publicPaths: string[]
   rateLimitPerMin: number
+  /** Per-client-IP request cap for unauthenticated public paths (e.g. /v1/tip-config). */
+  publicRateLimitPerMin: number
+  /** Edge-cache TTL (s) for cacheable GET responses on public paths. 0 disables caching. */
+  publicCacheTtlSecs: number
   maxBodyBytes: number
   ownershipCacheTtlMs: number
   /** Single-use: lease TTL (s) for an in-flight consume-digest redemption. */
@@ -83,6 +96,8 @@ export interface Config {
   nonceShard: NonceShardMode
   nonceMaxEntries: number
   quotaGuardEnabled: boolean
+  /** Allowed CORS origins — only these are reflected in Access-Control-Allow-Origin. */
+  allowedOrigins: string[]
 }
 
 function req(env: Env, key: keyof Env): string {
@@ -112,6 +127,19 @@ function parseAuthHeader(v: string | undefined): { name: string; value: string }
  * Each entry follows the same `Name: value` format as `SUI_RPC_AUTH_HEADER`.
  * Entries that cannot be parsed (no colon) are silently skipped.
  */
+const DEFAULT_ALLOWED_ORIGINS = [
+  'https://sui-walrus.meddleware.co.uk',
+  'https://sui.meddleware.co.uk',
+]
+
+function parseAllowedOrigins(v: string | undefined): string[] {
+  if (!v || v.trim().length === 0) return DEFAULT_ALLOWED_ORIGINS
+  return v
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
 function parseUpstreamAuthHeaders(v: string | undefined): Array<{ name: string; value: string }> {
   if (!v || v.trim().length === 0) return []
   return v
@@ -141,6 +169,8 @@ export function loadConfig(env: Env): Config {
       .map((s) => s.trim())
       .filter((s) => s.length > 0),
     rateLimitPerMin: numOr(env.RATE_LIMIT_PER_MIN, 30),
+    publicRateLimitPerMin: numOr(env.PUBLIC_RATE_LIMIT_PER_MIN, 120),
+    publicCacheTtlSecs: numOr(env.PUBLIC_CACHE_TTL_SECS, 60),
     maxBodyBytes: numOr(env.MAX_BODY_BYTES, 262144),
     ownershipCacheTtlMs: numOr(env.OWNERSHIP_CACHE_TTL_MS, 0),
     redemptionLeaseTtlSecs: numOr(env.REDEMPTION_LEASE_TTL_SECS, 120),
@@ -149,6 +179,7 @@ export function loadConfig(env: Env): Config {
     nonceShard,
     nonceMaxEntries: numOr(env.NONCE_MAX_ENTRIES, 1000000),
     quotaGuardEnabled: (env.QUOTA_GUARD_ENABLED ?? 'false').toLowerCase() === 'true',
+    allowedOrigins: parseAllowedOrigins(env.ALLOWED_ORIGINS),
   }
 }
 

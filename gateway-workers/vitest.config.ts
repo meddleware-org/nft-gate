@@ -28,6 +28,7 @@ export default defineConfig({
             'test/conformance.test.ts',
             'test/chain.test.ts',
             'test/redemption.test.ts',
+            'test/integration/grpc-chain.integration.test.ts',
           ],
         },
       },
@@ -44,6 +45,7 @@ export default defineConfig({
               bindings: {
                 UPSTREAM_URL: 'https://upstream.invalid',
                 SUI_RPC_URL: 'https://rpc.invalid',
+                ALLOWED_ORIGINS: 'https://allowed.example.com,https://sui-walrus.meddleware.co.uk',
               },
             },
           }),

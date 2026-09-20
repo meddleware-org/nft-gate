@@ -6,10 +6,14 @@
  * Access-Control-Allow-Origin headers the browser blocks the response even when
  * the Worker returns 200, and OPTIONS preflights (required before non-simple requests
  * such as PUT uploads with an Authorization header) receive no preflight grant.
+ *
+ * Origin allowlist: rather than reflecting `*`, only origins present in the configured
+ * ALLOWED_ORIGINS list receive the Access-Control-Allow-Origin header. An absent or
+ * disallowed origin gets no CORS header — the browser blocks the cross-origin request,
+ * which is the correct fail-closed behaviour.
  */
 
-const CORS_HEADERS: Record<string, string> = {
-  'access-control-allow-origin': '*',
+const CORS_STATIC_HEADERS: Record<string, string> = {
   'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS',
   'access-control-allow-headers': 'authorization, content-type, x-access-proof',
   'access-control-expose-headers': 'location, upload-offset',
@@ -17,12 +21,25 @@ const CORS_HEADERS: Record<string, string> = {
 }
 
 /**
- * Clone `res` and add CORS headers. Using `set()` so calling this on an upstream
- * response that already carries CORS headers just overwrites them consistently.
+ * Resolve the reflected `Access-Control-Allow-Origin` value for a request.
+ * Returns the request origin if it appears in `allowedOrigins`, otherwise `null`.
  */
-export function withCors(res: Response): Response {
+export function resolveAllowedOrigin(
+  requestOrigin: string | null,
+  allowedOrigins: string[],
+): string | null {
+  if (!requestOrigin || !allowedOrigins.includes(requestOrigin)) return null
+  return requestOrigin
+}
+
+/**
+ * Clone `res` and add CORS headers. If `allowedOrigin` is non-null, it is reflected
+ * as `Access-Control-Allow-Origin`; otherwise that header is omitted (fail closed).
+ */
+export function withCors(res: Response, allowedOrigin: string | null): Response {
   const out = new Response(res.body, res)
-  for (const [k, v] of Object.entries(CORS_HEADERS)) {
+  if (allowedOrigin) out.headers.set('access-control-allow-origin', allowedOrigin)
+  for (const [k, v] of Object.entries(CORS_STATIC_HEADERS)) {
     out.headers.set(k, v)
   }
   return out
@@ -30,9 +47,8 @@ export function withCors(res: Response): Response {
 
 /**
  * Return a minimal 204 preflight response for OPTIONS requests.
- * The browser requires this before sending non-simple cross-origin requests
- * (e.g. PUT/POST with Authorization or Content-Type).
+ * The Access-Control-Allow-Origin header is added by the outer withCors wrapper.
  */
 export function corsPreflightResponse(): Response {
-  return new Response(null, { status: 204, headers: CORS_HEADERS })
+  return new Response(null, { status: 204, headers: CORS_STATIC_HEADERS })
 }

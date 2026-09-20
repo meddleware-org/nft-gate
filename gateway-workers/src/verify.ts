@@ -190,6 +190,14 @@ export async function verifyAccessRequest(
     return { ok: false, denied: 'BadSignature' }
   }
 
+  // Canonicalise the address once the signature is proven, then use ONLY the normalised form for
+  // on-chain comparisons and the returned value. The client emits the raw caller address; on-chain
+  // owners are canonical (lower-case, 0x-prefixed, 64-hex), so comparing the raw string would
+  // fail-closed for a non-canonical input (e.g. missing leading zeros). Owning canonicalisation
+  // here — the security boundary — keeps the client wire format unchanged. (See conformance
+  // vectors `addressNormalization`; matched by the Rust gateway.)
+  const address = normalizeAddress(proof.address)
+
   // Consume the nonce exactly once (fresh, unexpired, unused) — before the chain call.
   if (!(await store.takeIfValid(proof.nonce))) {
     return { ok: false, denied: 'NonceInvalid' }
@@ -201,25 +209,25 @@ export async function verifyAccessRequest(
     }
     let ok: boolean
     try {
-      ok = await chain.consumeTxValid(proof.consumeDigest, proof.address, cfg.gateId)
+      ok = await chain.consumeTxValid(proof.consumeDigest, address, cfg.gateId)
     } catch {
       return { ok: false, denied: 'ChainError' }
     }
     if (!ok) return { ok: false, denied: 'ConsumeMissing' }
     // The consume is valid on-chain; the dispatcher leases/commits this digest so the use is
     // spent only on a successful upload (and a duplicate can't double-spend it).
-    return { ok: true, address: proof.address, redemptionKey: proof.consumeDigest }
+    return { ok: true, address, redemptionKey: proof.consumeDigest }
   }
 
   let ok: boolean
   try {
-    ok = await chain.ownsNft(proof.address, cfg.nftType, cfg.gateId)
+    ok = await chain.ownsNft(address, cfg.nftType, cfg.gateId)
   } catch {
     return { ok: false, denied: 'ChainError' }
   }
   if (!ok) return { ok: false, denied: 'NotOwner' }
 
-  return { ok: true, address: proof.address }
+  return { ok: true, address }
 }
 
 export { FLAG_ED25519, FLAG_SECP256K1, FLAG_SECP256R1, FLAG_MULTISIG, FLAG_ZKLOGIN }

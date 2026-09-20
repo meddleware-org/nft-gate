@@ -2,10 +2,37 @@
 
 ## What this crate is
 
-The Rust/Axum implementation of the nft-gate gateway. Wire-identical to `gateway-workers/`
-— same routes, status codes, proof format, Sui RPC calls, and env-var config. Deployed as
+The Rust/Axum implementation of the nft-gate gateway. Wire-identical to `gateway-workers/` on the
+client-facing contract — same routes, status codes, proof format, and env-var config. Deployed as
 a Docker container or a Cargo binary; state backed by an in-memory store (single replica) or
 Redis/Dragonfly (horizontal scale-out).
+
+## Chain access: hand-rolled gRPC-web (no JSON-RPC, no tonic/prost)
+
+Public Sui full nodes deprecated JSON-RPC and the GraphQL endpoints are unavailable, so `sui_rpc.rs`
+queries the chain over **gRPC-web** (`application/grpc-web+proto`, HTTP/1.1) via a minimal
+hand-rolled client in `grpc.rs` — deliberately **without** `tonic`/`prost`/`sui-rpc`, to keep the
+lightweight build (same rationale as avoiding `reqwest`; see the HTTP-client note). `grpc.rs` is a
+tiny protobuf writer/reader + gRPC-web framing over the shared `HttpClient`; only the fields the
+gateway reads are decoded. Field numbers are pinned from `MystenLabs/sui-apis` and validated against
+live responses (`sui_rpc::tests::live_consume_tx_valid`, `--ignored`).
+
+- `consume_tx_valid` (single-use) is **digest-first**, mirroring the Workers gateway:
+  `LedgerService/GetTransaction` → an `AccessConsumedEvent` for this **sender + gate** (gate read via
+  a recursive lookup of the event's `google.protobuf.Value` json, so no BCS field-order assumption).
+  It is NOT bound to the challenge nonce — single-use is enforced by the redemption store below.
+- `owns_nft` (non-single-use) uses `StateService/ListOwnedObjects`, matching `gate_id` via the same
+  json lookup.
+
+## Single-use redemption (a consumed use is never lost)
+
+The permanent on-chain `consumeDigest` is the one-time token, exactly as in the Workers gateway.
+`verify_access_request` returns `Verified { address, redemption_key }`; for single-use the dispatcher
+(`main.rs`) leases the digest (`NonceStore::try_lease_redemption`), proxies, then `commit`s on a 2xx
+upstream response or `release`s on failure — so an interrupted upload leaves the consume redeemable
+while a duplicate can't double-spend it. Redis keys use the `nftgate:redeem:` prefix; the in-memory
+store mirrors the semantics. `REDEMPTION_LEASE_TTL_SECS` (120) / `REDEMPTION_RETENTION_SECS` (30d)
+tune the lease/retention windows. A `RedeemConflict` → `409`.
 
 ## Axum architecture
 
@@ -13,7 +40,7 @@ Redis/Dragonfly (horizontal scale-out).
 - `cfg: GatewayConfig` — loaded from env vars at startup; immutable for the process lifetime.
 - `store: NonceStore` — in-memory or Redis, depending on `REDIS_URL`.
 - `limiter: RateLimiter` — `Mutex<HashMap>`, per-address fixed 60s window.
-- `chain: SuiRpc` — Sui JSON-RPC client; optional in-memory ownership cache.
+- `chain: SuiRpc` — Sui gRPC-web client (`grpc.rs`; public fullnodes deprecated JSON-RPC); optional in-memory ownership cache.
 - `http: HttpClient` — shared `hyper` client used by both the proxy and the RPC client.
 
 All routes are dispatched through a single `fallback` handler (`handle`). The router

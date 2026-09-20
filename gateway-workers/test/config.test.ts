@@ -57,3 +57,32 @@ describe('loadConfig — UPSTREAM_AUTH_HEADERS', () => {
     ])
   })
 })
+
+describe('loadConfig — ALLOWED_ORIGINS', () => {
+  it('defaults to the two Meddleware app origins when env var is absent', () => {
+    const cfg = loadConfig(baseEnv)
+    expect(cfg.allowedOrigins).toContain('https://sui-walrus.meddleware.co.uk')
+    expect(cfg.allowedOrigins).toContain('https://sui.meddleware.co.uk')
+  })
+
+  it('defaults to the two Meddleware app origins when env var is empty string', () => {
+    const cfg = loadConfig({ ...baseEnv, ALLOWED_ORIGINS: '' })
+    expect(cfg.allowedOrigins).toHaveLength(2)
+  })
+
+  it('parses a comma-separated list of origins', () => {
+    const cfg = loadConfig({
+      ...baseEnv,
+      ALLOWED_ORIGINS: 'https://app.example.com,https://admin.example.com',
+    })
+    expect(cfg.allowedOrigins).toEqual(['https://app.example.com', 'https://admin.example.com'])
+  })
+
+  it('trims whitespace around each origin', () => {
+    const cfg = loadConfig({
+      ...baseEnv,
+      ALLOWED_ORIGINS: '  https://app.example.com , https://admin.example.com  ',
+    })
+    expect(cfg.allowedOrigins).toEqual(['https://app.example.com', 'https://admin.example.com'])
+  })
+})

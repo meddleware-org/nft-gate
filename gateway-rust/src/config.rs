@@ -14,6 +14,8 @@
 //! - `SINGLE_USE` — `true` to require an on-chain single-use consume (default: `false`).
 //! - `PUBLIC_PATHS` — comma-separated paths proxied without auth (default: `/v1/tip-config`).
 //! - `RATE_LIMIT_PER_MIN` — per-address request budget per minute, 0 to disable (default: `30`).
+//! - `CHALLENGE_RATE_LIMIT_PER_MIN` — per-IP budget for the challenge endpoint per minute, 0 to
+//!   disable (default: `30`). Keyed by `X-Forwarded-For` first entry / `X-Real-IP` / "unknown".
 //! - `MAX_BODY_BYTES` — request body cap in bytes before proxying (default: `262144`).
 //! - `BIND_ADDR` — TCP listen address (default: `0.0.0.0:8080`).
 //! - `REDIS_URL` — Redis/Dragonfly URL for fleet-wide replay protection (default: unset →
@@ -21,6 +23,10 @@
 //! - `NONCE_MAX_ENTRIES` — hard cap on in-memory nonce entries (default: `1000000`).
 //! - `NONCE_PRUNE_INTERVAL_SECS` — background prune cadence for in-memory store (default: `60`).
 //! - `OWNERSHIP_CACHE_TTL_MS` — ownership-cache TTL in ms, 0 to disable (default: `0`).
+//! - `REDEMPTION_LEASE_TTL_SECS` — single-use: lease window for an in-flight consume-digest
+//!   redemption (default: `120`).
+//! - `REDEMPTION_RETENTION_SECS` — single-use: how long a committed (spent) consume-digest is
+//!   remembered to block re-redemption (default: `2592000` = 30 days).
 
 use std::net::SocketAddr;
 
@@ -42,8 +48,10 @@ pub struct GatewayConfig {
     pub single_use: bool,
     /// Paths served WITHOUT auth (proxied straight through), e.g. `/v1/tip-config`.
     pub public_paths: Vec<String>,
-    /// Per-address request budget per minute.
+    /// Per-address request budget per minute (post-auth).
     pub rate_limit_per_min: u32,
+    /// Per-IP request budget for the challenge endpoint per minute (pre-auth).
+    pub challenge_rate_limit_per_min: u32,
     /// Maximum request body accepted before proxying (bytes).
     pub max_body_bytes: usize,
     /// Optional Redis/Dragonfly URL for a shared TTL nonce store (fleet-wide replay
@@ -58,6 +66,10 @@ pub struct GatewayConfig {
     /// duplicate lookups under load at the cost of a brief staleness window on NFT
     /// transfer/burn. Never applied to the single-use consume-event check (always live).
     pub ownership_cache_ttl_ms: u64,
+    /// Single-use: lease window (secs) for an in-flight consume-digest redemption.
+    pub redemption_lease_ttl_secs: u64,
+    /// Single-use: retention (secs) of a committed (spent) consume-digest.
+    pub redemption_retention_secs: u64,
 }
 
 /// Return the value of `key` from the environment, or `default` if it is absent or empty.
@@ -93,6 +105,9 @@ impl GatewayConfig {
             .filter(|s| !s.is_empty())
             .collect();
         let rate_limit_per_min = env_or("RATE_LIMIT_PER_MIN", "30").parse().unwrap_or(30);
+        let challenge_rate_limit_per_min = env_or("CHALLENGE_RATE_LIMIT_PER_MIN", "30")
+            .parse()
+            .unwrap_or(30);
         let max_body_bytes = env_or("MAX_BODY_BYTES", "262144")
             .parse()
             .unwrap_or(262_144);
@@ -104,6 +119,12 @@ impl GatewayConfig {
             .parse()
             .unwrap_or(60);
         let ownership_cache_ttl_ms = env_or("OWNERSHIP_CACHE_TTL_MS", "0").parse().unwrap_or(0);
+        let redemption_lease_ttl_secs = env_or("REDEMPTION_LEASE_TTL_SECS", "120")
+            .parse()
+            .unwrap_or(120);
+        let redemption_retention_secs = env_or("REDEMPTION_RETENTION_SECS", "2592000")
+            .parse()
+            .unwrap_or(2_592_000);
 
         Ok(Self {
             bind_addr,
@@ -115,11 +136,14 @@ impl GatewayConfig {
             single_use,
             public_paths,
             rate_limit_per_min,
+            challenge_rate_limit_per_min,
             max_body_bytes,
             redis_url,
             nonce_max_entries,
             nonce_prune_interval_secs,
             ownership_cache_ttl_ms,
+            redemption_lease_ttl_secs,
+            redemption_retention_secs,
         })
     }
 

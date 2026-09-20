@@ -13,7 +13,6 @@ use hyper::Request;
 use hyper_rustls::HttpsConnector;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
-use serde_json::Value;
 
 type Connector = HttpsConnector<HttpConnector>;
 
@@ -42,27 +41,33 @@ impl HttpClient {
         Ok(Self { inner })
     }
 
-    /// POST `body` as JSON to `url` and return the response body parsed as a JSON `Value`.
-    pub async fn post_json(&self, url: &str, body: &Value) -> anyhow::Result<Value> {
-        let payload = serde_json::to_vec(body)?;
+    /// POST an already gRPC-web-framed `body` to `url` with the `application/grpc-web+proto`
+    /// content type and return the raw response body (a message frame plus a trailer frame — the
+    /// caller unframes it; see `grpc::unframe`). Sui full nodes serve gRPC-web over HTTP/1.1.
+    pub async fn post_grpc_web(&self, url: &str, body: Bytes) -> anyhow::Result<Bytes> {
         let req = Request::builder()
             .method(Method::POST)
             .uri(url)
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Full::new(Bytes::from(payload)))
-            .context("failed to build RPC request")?;
+            .header(header::CONTENT_TYPE, "application/grpc-web+proto")
+            .header(header::ACCEPT, "application/grpc-web+proto")
+            .body(Full::new(body))
+            .context("failed to build gRPC-web request")?;
         let resp = self
             .inner
             .request(req)
             .await
-            .context("RPC request failed")?;
+            .context("gRPC-web request failed")?;
+        let status = resp.status();
         let bytes = resp
             .into_body()
             .collect()
             .await
-            .context("reading RPC response")?
+            .context("reading gRPC-web response")?
             .to_bytes();
-        serde_json::from_slice(&bytes).context("parsing RPC response JSON")
+        if !status.is_success() {
+            anyhow::bail!("gRPC-web HTTP {status}");
+        }
+        Ok(bytes)
     }
 
     /// Forward a request to `url`, preserving the method, headers, and body.

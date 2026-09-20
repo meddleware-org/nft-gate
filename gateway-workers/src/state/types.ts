@@ -59,7 +59,9 @@ export function shardOfNonce(nonce: string): string {
 
 /**
  * Generate a cryptographically random 48-character hex string (24 bytes of entropy). Matches
- * the Rust gateway's `random_nonce()` entropy so conformance vectors apply to both.
+ * the Rust gateway's `random_nonce()` entropy so conformance vectors apply to both. Nonces are
+ * **ASCII by contract** — this hex plus an ASCII `<region>.` prefix — and the client's
+ * `decodeAccessProof` enforces ASCII, so the proof-token base64 never carries non-ASCII bytes.
  *
  * @returns A 48-character lowercase hex string.
  */

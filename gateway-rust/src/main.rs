@@ -25,6 +25,7 @@
 
 mod challenge;
 mod config;
+mod grpc;
 mod http_client;
 mod proof;
 mod proxy;
@@ -53,9 +54,11 @@ pub struct AppState {
     cfg: GatewayConfig,
     /// Single-use nonce store (in-memory or Redis).
     store: NonceStore,
-    /// Per-address, fixed-window rate limiter.
+    /// Per-authenticated-address, fixed-window rate limiter (post-auth).
     limiter: RateLimiter,
-    /// Sui JSON-RPC client for ownership and consume-event queries.
+    /// Per-IP rate limiter for the challenge endpoint and public paths (pre-auth).
+    ip_limiter: RateLimiter,
+    /// Sui gRPC client (gRPC-web) for ownership and consume-transaction queries.
     chain: SuiRpc,
     /// Shared HTTP client used by both the reverse proxy and the Sui RPC calls.
     http: HttpClient,
@@ -64,6 +67,31 @@ pub struct AppState {
 /// Build a JSON `{"error": reason}` response with the given status code.
 fn deny(status: StatusCode, reason: &str) -> Response {
     (status, Json(json!({ "error": reason }))).into_response()
+}
+
+/// Extract the client IP from `X-Forwarded-For` (first entry) or `X-Real-IP`. Falls back to
+/// `"unknown"` so rate-limiting always has a key (and rate-limits all unknown-origin traffic
+/// together). This function is used only for pre-auth rate-limiting — not for authentication.
+fn extract_client_ip(req: &Request) -> String {
+    if let Some(xff) = req.headers().get("x-forwarded-for") {
+        if let Ok(s) = xff.to_str() {
+            if let Some(first) = s.split(',').next() {
+                let ip = first.trim();
+                if !ip.is_empty() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+    if let Some(real_ip) = req.headers().get("x-real-ip") {
+        if let Ok(s) = real_ip.to_str() {
+            let ip = s.trim();
+            if !ip.is_empty() {
+                return ip.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
 }
 
 /// Extract the base64 access-proof token from the request. Prefers `Authorization: Bearer
@@ -95,12 +123,20 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
     }
 
     if method == Method::GET && path == "/v1/challenge" {
+        let ip = extract_client_ip(&req);
+        if !app.ip_limiter.check(&ip) {
+            return deny(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
+        }
         let (nonce, expires_at) = app.store.issue().await;
         return Json(json!({ "nonce": nonce, "expiresAt": expires_at })).into_response();
     }
 
-    // Public passthrough (e.g. /v1/tip-config): forward without auth.
+    // Public passthrough (e.g. /v1/tip-config): rate-limit per IP then forward without auth.
     if app.cfg.is_public_path(&path) {
+        let ip = extract_client_ip(&req);
+        if !app.ip_limiter.check(&ip) {
+            return deny(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
+        }
         return proxy::forward(&app, req).await;
     }
 
@@ -110,15 +146,49 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
     };
 
     match verify_access_request(&app.cfg, &app.store, &token, &app.chain).await {
-        Ok(address) => {
-            if !app.limiter.check(&address) {
+        Ok(verified) => {
+            if !app.limiter.check(&verified.address) {
                 return deny(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
             }
-            proxy::forward(&app, req).await
+            match verified.redemption_key {
+                // Single-use: the permanent on-chain consume digest is the one-time token. Lease it,
+                // proxy, then COMMIT on a successful upload or RELEASE on failure — so an interrupted
+                // upload leaves the consume redeemable while a duplicate can't double-spend it.
+                Some(key) => {
+                    match app
+                        .store
+                        .try_lease_redemption(&key, app.cfg.redemption_lease_ttl_secs)
+                        .await
+                    {
+                        challenge::Lease::Redeemed | challenge::Lease::Leased => {
+                            deny(StatusCode::CONFLICT, verify::Denied::RedeemConflict.reason())
+                        }
+                        challenge::Lease::Ok => {
+                            let resp = proxy::forward(&app, req).await;
+                            if resp.status().is_success() {
+                                if let Err(e) = app
+                                    .store
+                                    .commit_redemption(&key, app.cfg.redemption_retention_secs)
+                                    .await
+                                {
+                                    tracing::error!(error = %e, "commit_redemption failed");
+                                    app.store.release_redemption(&key).await;
+                                    return deny(StatusCode::BAD_GATEWAY, "redemption commit failed");
+                                }
+                            } else {
+                                app.store.release_redemption(&key).await;
+                            }
+                            resp
+                        }
+                    }
+                }
+                None => proxy::forward(&app, req).await,
+            }
         }
         Err(d) => {
             let status = match d {
                 verify::Denied::ChainError => StatusCode::BAD_GATEWAY,
+                verify::Denied::RedeemConflict => StatusCode::CONFLICT,
                 _ => StatusCode::FORBIDDEN,
             };
             deny(status, d.reason())
@@ -162,6 +232,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let limiter = RateLimiter::new(cfg.rate_limit_per_min);
+    let ip_limiter = RateLimiter::new(cfg.challenge_rate_limit_per_min);
     let bind_addr = cfg.bind_addr;
     let prune_interval = cfg.nonce_prune_interval_secs.max(1);
 
@@ -169,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
         cfg,
         store,
         limiter,
+        ip_limiter,
         chain,
         http,
     });
@@ -225,11 +297,14 @@ mod tests {
             single_use: false,
             public_paths: vec![],
             rate_limit_per_min: 30,
+            challenge_rate_limit_per_min: 30,
             max_body_bytes: 262144,
             redis_url: None,
             nonce_max_entries: 10_000,
             nonce_prune_interval_secs: 60,
             ownership_cache_ttl_ms: 0,
+            redemption_lease_ttl_secs: 120,
+            redemption_retention_secs: 2_592_000,
         }
     }
 }

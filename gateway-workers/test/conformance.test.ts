@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import vectors from '../../conformance/vectors.json'
-import { verifyPersonalMessageSignature } from '../src/verify.js'
+import { verifyPersonalMessageSignature, normalizeAddress } from '../src/verify.js'
 import { personalMessageForNonce, decodeAccessProof } from '../src/wire.js'
 import { base64ToBytes } from '../src/crypto.js'
 
@@ -20,6 +20,12 @@ describe('conformance vectors (shared with the Rust gateway)', () => {
     expect(p.nonce).toBe(vectors.proofDecode.expect.nonce)
     expect(p.signature).toBe(vectors.proofDecode.expect.signature)
   })
+
+  for (const c of vectors.addressNormalization.cases) {
+    it(`normalizes address ${c.input} to canonical form (matches Rust gateway)`, () => {
+      expect(normalizeAddress(c.input)).toBe(c.expected)
+    })
+  }
 
   for (const sig of vectors.signatures) {
     it(`verifies the ${sig.scheme} golden signature and recovers the address`, () => {

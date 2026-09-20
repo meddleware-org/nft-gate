@@ -182,18 +182,15 @@ pub trait ChainQuery {
         gate_id: Option<&str>,
     ) -> anyhow::Result<bool>;
 
-    /// Is there a matching on-chain single-use consume for this challenge? An
-    /// `AccessConsumedEvent` carrying `nonce`, emitted by a consume tx from `address`, for
-    /// `nft_type` (optionally `gate_id`). When `consume_digest` is supplied, that exact
-    /// transaction is ALSO verified directly (defence in depth); the sender+nonce event match
-    /// remains the primary gate.
-    async fn consume_event_matches(
+    /// Does `consume_digest` name a successful `access_gate::consume` transaction that emitted an
+    /// `AccessConsumedEvent` for `address` (the sender) on `gate_id`? Digest-first and NOT bound to
+    /// the challenge nonce — single-use is enforced by the redemption store keying on the digest,
+    /// so an interrupted upload can resume with a fresh challenge while reusing the same consume.
+    async fn consume_tx_valid(
         &self,
-        nonce: &str,
+        consume_digest: &str,
         address: &str,
-        nft_type: &str,
         gate_id: Option<&str>,
-        consume_digest: Option<&str>,
     ) -> anyhow::Result<bool>;
 }
 
@@ -210,6 +207,8 @@ pub enum Denied {
     NotOwner,
     /// No matching on-chain single-use consume event was found (single-use mode).
     ConsumeMissing,
+    /// The consume has already been redeemed for an upload, or one is in progress (single-use).
+    RedeemConflict,
     /// An on-chain query failed; the gateway returns 502 for this variant.
     ChainError,
 }
@@ -222,10 +221,21 @@ impl Denied {
             Denied::BadSignature => "signature does not recover address",
             Denied::NonceInvalid => "challenge nonce invalid, expired, or already used",
             Denied::NotOwner => "address does not hold the required access NFT",
-            Denied::ConsumeMissing => "no matching single-use consume for this challenge",
+            Denied::ConsumeMissing => "no matching single-use consume for this address",
+            Denied::RedeemConflict => {
+                "this consume is already redeemed or an upload for it is in progress"
+            }
             Denied::ChainError => "on-chain verification failed",
         }
     }
+}
+
+/// A successful verification: the recovered address, plus (single-use mode) the `consume_digest`
+/// the dispatcher leases/commits so a use is only spent on a successful upload.
+#[derive(Debug)]
+pub struct Verified {
+    pub address: String,
+    pub redemption_key: Option<String>,
 }
 
 /// Authorise a request from its base64 proof token. Returns the verified address on success.
@@ -236,13 +246,21 @@ pub async fn verify_access_request<C: ChainQuery>(
     store: &NonceStore,
     token: &str,
     chain: &C,
-) -> Result<String, Denied> {
+) -> Result<Verified, Denied> {
     let proof = decode_access_proof(token).map_err(|_| Denied::BadProof)?;
 
     let message = personal_message_for_nonce(&proof.nonce);
     if !verify_personal_message_signature(&proof.address, &message, &proof.signature) {
         return Err(Denied::BadSignature);
     }
+
+    // Canonicalise the address once the signature is proven, then use ONLY the normalised form for
+    // on-chain comparisons and the returned value. The client emits the raw caller address; on-chain
+    // owners are canonical (lower-case, 0x-prefixed, 64-hex), so comparing the raw string would
+    // fail-closed for a non-canonical input (e.g. missing leading zeros). Owning canonicalisation
+    // here — the security boundary — keeps the client wire format unchanged. (See conformance
+    // vectors `addressNormalization`; matched by the Workers gateway.)
+    let address = normalize_address(&proof.address);
 
     // Consume the nonce exactly once (fresh, unexpired, unused).
     if !store.take_if_valid(&proof.nonce).await {
@@ -252,33 +270,35 @@ pub async fn verify_access_request<C: ChainQuery>(
     if cfg.single_use {
         // A single-use client MUST first submit an on-chain consume and include its digest;
         // its absence signals a misconfigured/replaying client.
-        if proof.consume_digest.is_none() {
+        let Some(digest) = proof.consume_digest.as_deref() else {
             return Err(Denied::ConsumeMissing);
-        }
+        };
         let ok = chain
-            .consume_event_matches(
-                &proof.nonce,
-                &proof.address,
-                &cfg.nft_type,
-                cfg.gate_id.as_deref(),
-                proof.consume_digest.as_deref(),
-            )
+            .consume_tx_valid(digest, &address, cfg.gate_id.as_deref())
             .await
             .map_err(|_| Denied::ChainError)?;
         if !ok {
             return Err(Denied::ConsumeMissing);
         }
-    } else {
-        let ok = chain
-            .owns_nft(&proof.address, &cfg.nft_type, cfg.gate_id.as_deref())
-            .await
-            .map_err(|_| Denied::ChainError)?;
-        if !ok {
-            return Err(Denied::NotOwner);
-        }
+        // The consume is valid on-chain; the dispatcher leases/commits this digest so the use is
+        // spent only on a successful upload (and a duplicate can't double-spend it).
+        return Ok(Verified {
+            address,
+            redemption_key: Some(digest.to_string()),
+        });
     }
 
-    Ok(proof.address)
+    let ok = chain
+        .owns_nft(&address, &cfg.nft_type, cfg.gate_id.as_deref())
+        .await
+        .map_err(|_| Denied::ChainError)?;
+    if !ok {
+        return Err(Denied::NotOwner);
+    }
+    Ok(Verified {
+        address,
+        redemption_key: None,
+    })
 }
 
 #[cfg(test)]
@@ -434,6 +454,18 @@ mod tests {
             pd["expect"]["signature"].as_str().unwrap()
         );
 
+        // address normalization — the proof address is canonicalised before on-chain owner
+        // comparison; both gateways must produce identical output for the same input.
+        for case in v["addressNormalization"]["cases"].as_array().unwrap() {
+            let input = case["input"].as_str().unwrap();
+            let expected = case["expected"].as_str().unwrap();
+            assert_eq!(
+                normalize_address(input),
+                expected,
+                "address normalization diverged for input {input}"
+            );
+        }
+
         // per-scheme signature verification (ed25519 / secp256k1 / secp256r1)
         for sig in v["signatures"].as_array().unwrap() {
             let address = sig["address"].as_str().unwrap();
@@ -487,13 +519,11 @@ mod tests {
         async fn owns_nft(&self, _a: &str, _t: &str, _g: Option<&str>) -> anyhow::Result<bool> {
             Ok(self.owns)
         }
-        async fn consume_event_matches(
+        async fn consume_tx_valid(
             &self,
-            _n: &str,
+            _d: &str,
             _a: &str,
-            _t: &str,
             _g: Option<&str>,
-            _d: Option<&str>,
         ) -> anyhow::Result<bool> {
             Ok(self.consumed)
         }
@@ -510,11 +540,14 @@ mod tests {
             single_use,
             public_paths: vec!["/v1/tip-config".into()],
             rate_limit_per_min: 30,
+            challenge_rate_limit_per_min: 30,
             max_body_bytes: 262144,
             redis_url: None,
             nonce_max_entries: 10_000,
             nonce_prune_interval_secs: 60,
             ownership_cache_ttl_ms: 0,
+            redemption_lease_ttl_secs: 120,
+            redemption_retention_secs: 2_592_000,
         }
     }
 
@@ -534,7 +567,9 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(res.unwrap(), address);
+        let v = res.unwrap();
+        assert_eq!(v.address, address);
+        assert_eq!(v.redemption_key, None); // ownership mode has no redemption key
     }
 
     #[tokio::test]
@@ -645,7 +680,10 @@ mod tests {
             },
         )
         .await;
-        assert_eq!(ok.unwrap(), address);
+        let v = ok.unwrap();
+        assert_eq!(v.address, address);
+        // single-use returns the consume digest as the redemption key for the dispatcher to lease
+        assert_eq!(v.redemption_key.as_deref(), Some("0xdigest"));
     }
 
     #[tokio::test]

@@ -13,6 +13,8 @@ declare namespace Cloudflare {
     NONCE_BACKEND: string
     NONCE_SHARD: string
     RATE_LIMIT_PER_MIN: string
+    PUBLIC_RATE_LIMIT_PER_MIN: string
+    PUBLIC_CACHE_TTL_SECS: string
     CHALLENGE_TTL_SECS: string
   }
 }

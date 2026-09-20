@@ -15,7 +15,7 @@ import { SuiGrpc } from './chain.js'
 import { verifyAccessRequest, deniedReason } from './verify.js'
 import { forward } from './proxy.js'
 import { runQuotaGuard } from './quota.js'
-import { withCors, corsPreflightResponse } from './cors.js'
+import { withCors, corsPreflightResponse, resolveAllowedOrigin } from './cors.js'
 
 export { NonceRateState } from './state/durable_object.js'
 
@@ -114,6 +114,45 @@ function regionOf(cfg: Config, request: Request): string {
 }
 
 /**
+ * Forward an UNAUTHENTICATED public path (e.g. `/v1/tip-config`) to the upstream, hardened so it
+ * can't be used to hammer the single relay origin:
+ *   1. Per-client-IP rate limit (keyed on `CF-Connecting-IP`) — a higher ceiling than the gated
+ *      per-address limit since these are cheap GETs, but bounded so a flood is rejected at the edge.
+ *   2. Edge cache of successful GET responses (tip-config is near-static) via the Cache API, so
+ *      repeat/flood reads are served from Cloudflare without reaching the origin at all.
+ * Non-GET public requests are still rate-limited but not cached.
+ */
+async function forwardPublic(
+  cfg: Config,
+  backend: NonceBackend,
+  request: Request,
+  region: string,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'
+  if (!(await backend.rateCheck(`ip:${ip}`, cfg.publicRateLimitPerMin, region))) {
+    return deny(429, 'rate limit exceeded')
+  }
+
+  if (request.method !== 'GET' || cfg.publicCacheTtlSecs <= 0) return forward(cfg, request)
+
+  // Cache key is the URL alone (public GET, no auth/cookies to vary on).
+  const cache = (caches as unknown as { default: Cache }).default
+  const cacheKey = new Request(new URL(request.url).toString(), { method: 'GET' })
+  const hit = await cache.match(cacheKey)
+  if (hit) return hit
+
+  const resp = await forward(cfg, request)
+  if (resp.ok) {
+    const cached = new Response(resp.body, resp)
+    cached.headers.set('Cache-Control', `public, max-age=${cfg.publicCacheTtlSecs}`)
+    ctx.waitUntil(cache.put(cacheKey, cached.clone()))
+    return cached
+  }
+  return resp
+}
+
+/**
  * Main request dispatcher. Handles `/healthz`, `/v1/challenge`, configured public paths,
  * and gated paths (signature + ownership verification before proxying to the upstream).
  *
@@ -121,7 +160,7 @@ function regionOf(cfg: Config, request: Request): string {
  * @param env - The Worker environment bindings.
  * @returns A `Response` to send to the client.
  */
-async function handle(request: Request, env: Env): Promise<Response> {
+async function handle(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url)
   const path = url.pathname
 
@@ -146,8 +185,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json(200, { nonce, expiresAt })
   }
 
-  // Public passthrough (e.g. /v1/tip-config): forward without auth.
-  if (isPublicPath(cfg, path)) return forward(cfg, request)
+  // Public passthrough (e.g. /v1/tip-config): forward without auth, but protect the single relay
+  // origin — these bypass the NFT gate. Per-client-IP rate limit + edge-cache of GET responses.
+  if (isPublicPath(cfg, path)) {
+    return forwardPublic(cfg, backend, request, regionOf(cfg, request), ctx)
+  }
 
   const token = extractProofToken(request)
   if (!token) return deny(401, 'missing access proof')
@@ -198,8 +240,13 @@ async function handle(request: Request, env: Env): Promise<Response> {
  * {@link handle}; the `scheduled` handler runs the optional quota guard on a cron trigger.
  */
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return handle(request, env).then(withCors)
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const origin = request.headers.get('origin')
+    const res = await handle(request, env, ctx)
+    // State is cached after handle() completes; a second call is free.
+    const state = await getState(env).catch(() => null)
+    const allowedOrigin = resolveAllowedOrigin(origin, state?.cfg.allowedOrigins ?? [])
+    return withCors(res, allowedOrigin)
   },
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     if ((env.QUOTA_GUARD_ENABLED ?? 'false').toLowerCase() === 'true') {

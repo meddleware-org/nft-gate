@@ -34,8 +34,9 @@ deployed against a public fullnode (see the nft-gate CLAUDE.md deferred section)
   that requires durability — use Durable Objects or KV.
 - **No long-running tasks.** `scheduled` handler is for the quota guard cron only; do not put
   request-path logic there.
-- **`waitUntil` is available** but not used here — the quota guard runs in the `scheduled` handler,
-  not on the request path.
+- **`waitUntil` is used** on the request path to populate the public-path edge cache
+  (`forwardPublic` in `index.ts`) without blocking the response; the quota guard runs separately in
+  the `scheduled` handler.
 
 ## Secrets pattern
 

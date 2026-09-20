@@ -99,6 +99,8 @@ function cfg(singleUse: boolean): Config {
     singleUse,
     publicPaths: ['/v1/tip-config'],
     rateLimitPerMin: 30,
+    publicRateLimitPerMin: 120,
+    publicCacheTtlSecs: 60,
     maxBodyBytes: 262144,
     ownershipCacheTtlMs: 0,
     redemptionLeaseTtlSecs: 120,
@@ -108,6 +110,7 @@ function cfg(singleUse: boolean): Config {
     nonceMaxEntries: 10000,
     quotaGuardEnabled: false,
     upstreamAuthHeaders: [],
+    allowedOrigins: ['https://example.com'],
   }
 }
 
