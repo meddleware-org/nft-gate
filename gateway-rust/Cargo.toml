@@ -5,7 +5,6 @@ edition = "2021"
 license = "0BSD"
 description = "Generic NFT-gated reverse-proxy: verifies wallet-signed access proofs against on-chain NFT ownership, then forwards to any upstream."
 repository = "https://github.com/meddleware-org/nft-gate"
-homepage = "https://github.com/meddleware-org/nft-gate"
 documentation = "https://github.com/meddleware-org/nft-gate/tree/main/gateway-rust"
 readme = "README.md"
 keywords = ["nft", "sui", "gateway", "access-control", "reverse-proxy"]
@@ -39,7 +38,6 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 # Shared TTL nonce store for horizontal scale-out (Redis protocol; works with Dragonfly).
 redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
 anyhow = "1"
-thiserror = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
