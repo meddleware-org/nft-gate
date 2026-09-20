@@ -375,6 +375,9 @@ mod tests {
         s.bytes_field(STRUCT_FIELDS, &entry.into_bytes());
         let mut outer = ProtoWriter::new();
         outer.bytes_field(VALUE_STRUCT, &s.into_bytes());
-        assert_eq!(value_find_string(&outer.into_bytes(), "gate_id").as_deref(), Some("0xGATE"));
+        assert_eq!(
+            value_find_string(&outer.into_bytes(), "gate_id").as_deref(),
+            Some("0xGATE")
+        );
     }
 }

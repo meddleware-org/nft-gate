@@ -467,7 +467,10 @@ mod tests {
         assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Leased);
         store.commit_redemption("0xd", 3600).await.unwrap();
         // Once committed, it can never be re-leased.
-        assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Redeemed);
+        assert_eq!(
+            store.try_lease_redemption("0xd", 120).await,
+            Lease::Redeemed
+        );
     }
 
     #[tokio::test]
@@ -484,7 +487,10 @@ mod tests {
         store.try_lease_redemption("0xd", 120).await;
         store.commit_redemption("0xd", 3600).await.unwrap();
         store.release_redemption("0xd").await; // must be a no-op on a committed key
-        assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Redeemed);
+        assert_eq!(
+            store.try_lease_redemption("0xd", 120).await,
+            Lease::Redeemed
+        );
     }
 
     #[tokio::test]

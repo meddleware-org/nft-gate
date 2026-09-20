@@ -160,9 +160,10 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
                         .try_lease_redemption(&key, app.cfg.redemption_lease_ttl_secs)
                         .await
                     {
-                        challenge::Lease::Redeemed | challenge::Lease::Leased => {
-                            deny(StatusCode::CONFLICT, verify::Denied::RedeemConflict.reason())
-                        }
+                        challenge::Lease::Redeemed | challenge::Lease::Leased => deny(
+                            StatusCode::CONFLICT,
+                            verify::Denied::RedeemConflict.reason(),
+                        ),
                         challenge::Lease::Ok => {
                             let resp = proxy::forward(&app, req).await;
                             if resp.status().is_success() {
@@ -173,7 +174,10 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
                                 {
                                     tracing::error!(error = %e, "commit_redemption failed");
                                     app.store.release_redemption(&key).await;
-                                    return deny(StatusCode::BAD_GATEWAY, "redemption commit failed");
+                                    return deny(
+                                        StatusCode::BAD_GATEWAY,
+                                        "redemption commit failed",
+                                    );
                                 }
                             } else {
                                 app.store.release_redemption(&key).await;

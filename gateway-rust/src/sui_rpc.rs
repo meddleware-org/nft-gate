@@ -8,7 +8,9 @@
 //! emitted an `AccessConsumedEvent` for this sender + gate. It is NOT bound to the challenge nonce,
 //! so an interrupted upload can resume with a fresh challenge while reusing the same consume.
 
-use crate::grpc::{field_bytes, field_str, value_find_string, Field, GrpcWeb, ProtoReader, ProtoWriter};
+use crate::grpc::{
+    field_bytes, field_str, value_find_string, Field, GrpcWeb, ProtoReader, ProtoWriter,
+};
 use crate::http_client::HttpClient;
 use crate::verify::ChainQuery;
 use std::collections::HashMap;
@@ -87,7 +89,10 @@ impl SuiRpc {
         req.uint_field(LOO_PAGE_SIZE, 50);
         req.bytes_field(LOO_READ_MASK, &mask.into_bytes());
         req.string_field(LOO_OBJECT_TYPE, nft_type);
-        let resp = self.grpc.call(STATE_LIST_OWNED_OBJECTS, req.into_bytes()).await?;
+        let resp = self
+            .grpc
+            .call(STATE_LIST_OWNED_OBJECTS, req.into_bytes())
+            .await?;
         Ok(response_has_owned(&resp, gate_id))
     }
 }
@@ -192,7 +197,10 @@ impl ChainQuery for SuiRpc {
     ) -> anyhow::Result<bool> {
         let resp = self
             .grpc
-            .call(LEDGER_GET_TRANSACTION, build_get_transaction(consume_digest))
+            .call(
+                LEDGER_GET_TRANSACTION,
+                build_get_transaction(consume_digest),
+            )
             .await?;
         Ok(response_has_consume(&resp, address, gate_id))
     }
@@ -252,13 +260,21 @@ mod tests {
         let resp = tx_response(&[event(CONSUMED, "0xowner", "0xgate")]);
         assert!(!response_has_consume(&resp, "0xattacker", Some("0xgate"))); // wrong sender
         assert!(!response_has_consume(&resp, "0xowner", Some("0xwrong"))); // wrong gate
-        let other = tx_response(&[event("0xpkg::access_gate::PurchasedEvent", "0xowner", "0xgate")]);
+        let other = tx_response(&[event(
+            "0xpkg::access_gate::PurchasedEvent",
+            "0xowner",
+            "0xgate",
+        )]);
         assert!(!response_has_consume(&other, "0xowner", Some("0xgate"))); // wrong event type
     }
 
     #[test]
     fn rejects_when_no_events() {
-        assert!(!response_has_consume(&tx_response(&[]), "0xowner", Some("0xgate")));
+        assert!(!response_has_consume(
+            &tx_response(&[]),
+            "0xowner",
+            Some("0xgate")
+        ));
         assert!(!response_has_consume(&[], "0xowner", None)); // empty/failed tx
     }
 
@@ -300,8 +316,17 @@ mod tests {
         let digest = "BbsLUnQGoWSDg6Kd1Hy8vGnyotJtz4hcp45sMv7cGHwU";
         let addr = "0xe6b2810abfc5a6f37a375f73e3ba76cfc37584196e453255ad3c9ca2f0ede0ed";
         let gate = "0x0485c1fa80e4c355c85ab99c0281a328d8fb5c60ac50ab64f10be0f8be792aba";
-        assert!(rpc.consume_tx_valid(digest, addr, Some(gate)).await.unwrap());
-        assert!(!rpc.consume_tx_valid(digest, "0x01", Some(gate)).await.unwrap());
-        assert!(!rpc.consume_tx_valid(digest, addr, Some("0xdead")).await.unwrap());
+        assert!(rpc
+            .consume_tx_valid(digest, addr, Some(gate))
+            .await
+            .unwrap());
+        assert!(!rpc
+            .consume_tx_valid(digest, "0x01", Some(gate))
+            .await
+            .unwrap());
+        assert!(!rpc
+            .consume_tx_valid(digest, addr, Some("0xdead"))
+            .await
+            .unwrap());
     }
 }
