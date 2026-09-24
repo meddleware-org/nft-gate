@@ -70,7 +70,7 @@ NONCE_MAX_ENTRIES = "1000000"
 QUOTA_GUARD_ENABLED = "false"
 # Comma-separated list of browser origins allowed to make cross-origin requests.
 # Only these origins receive Access-Control-Allow-Origin in responses.
-ALLOWED_ORIGINS = "https://sui-walrus.meddleware.co.uk,https://sui.meddleware.co.uk"
+ALLOWED_ORIGINS = "https://sui-walrus.meddleware.co.uk,https://dash.meddleware.co.uk"
 
 # ── nonce store + rate limiter: region-sharded, SQLite-backed Durable Objects (free-tier) ────
 [[durable_objects.bindings]]
