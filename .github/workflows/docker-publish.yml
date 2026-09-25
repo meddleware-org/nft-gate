@@ -1,5 +1,4 @@
-name: Publish
-
+name: Publish (Docker)
 on:
   push:
     tags:
@@ -9,6 +8,21 @@ env:
   IMAGE: nft-gate-gateway
 
 jobs:
+  verify:
+    name: Verify (gateway-rust tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway-rust
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: "gateway-rust -> target"
+      - name: Test
+        run: cargo test
+
   # ── Rust gateway: Docker image — split into per-arch native builds + merge ──
   # Using native ubuntu-24.04-arm runners instead of QEMU emulation eliminates
   # the 10-20x slowdown of arm64 Rust compilation under QEMU. Each leg builds
@@ -18,6 +32,7 @@ jobs:
   build-docker-amd64-public:
     name: Docker amd64 (quay.io + Docker Hub)
     runs-on: ubuntu-latest
+    needs: verify
     permissions:
       contents: read
     steps:
@@ -53,6 +68,7 @@ jobs:
   build-docker-arm64-public:
     name: Docker arm64 (quay.io + Docker Hub)
     runs-on: ubuntu-24.04-arm
+    needs: verify
     permissions:
       contents: read
     steps:
@@ -187,6 +203,7 @@ jobs:
   build-docker-amd64-private:
     name: Docker amd64 (self-hosted registry)
     runs-on: ubuntu-latest
+    needs: verify
     continue-on-error: true
     permissions:
       contents: read
@@ -214,6 +231,7 @@ jobs:
   build-docker-arm64-private:
     name: Docker arm64 (self-hosted registry)
     runs-on: ubuntu-24.04-arm
+    needs: verify
     continue-on-error: true
     permissions:
       contents: read
@@ -278,78 +296,3 @@ jobs:
             FLAGS="$FLAGS --tag $tag"
           done <<< "${{ steps.meta.outputs.tags }}"
           docker buildx imagetools create $FLAGS "${SRC}-amd64" "${SRC}-arm64"
-
-  # ── Rust gateway: crates.io (cargo install distribution) ───────────────────
-  publish-crates:
-    name: crates.io (gateway-rust)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: gateway-rust
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "gateway-rust -> target"
-
-      - name: Check if already published
-        id: check
-        run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
-          HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
-            -H "User-Agent: github-actions/nft-gate" \
-            "https://crates.io/api/v1/crates/nft-gate-gateway/$VERSION")
-          if [ "$HTTP" = "200" ]; then
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::v$VERSION already on crates.io — skipping"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Publish to crates.io
-        if: steps.check.outputs.skip == 'false'
-        run: cargo publish --allow-dirty
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  # ── Workers gateway: npmjs (source-distribution for forkers) ───────────────
-  # Uses OIDC trusted publisher — no static NPM_TOKEN secret required.
-  # IMPORTANT: configure @meddleware/nft-gate-gateway as a Trusted Publisher on
-  # npmjs.com (repo: meddleware-org/nft-gate, workflow: publish.yml) before
-  # removing continue-on-error. Until then, publish manually before pushing the
-  # tag — the version-check will skip cleanly once npm's CDN propagates.
-  publish-npm:
-    name: npmjs (@meddleware/nft-gate-gateway)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    permissions:
-      contents: read
-      id-token: write   # required for OIDC trusted publisher exchange
-    defaults:
-      run:
-        working-directory: gateway-workers
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: actions/setup-node@v7.0.0
-        with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Publish to npmjs (provenance via OIDC, idempotent)
-        run: |
-          VERSION=$(node -p "require('./package.json').version")
-          # Use npm view (registry API) instead of curl (CDN) to avoid propagation-lag
-          # false negatives that cause the publish to be attempted when the version is
-          # already live but not yet reflected on the CDN.
-          if npm view "@meddleware/nft-gate-gateway@${VERSION}" version >/dev/null 2>&1; then
-            echo "::notice::v${VERSION} already published to npmjs — skipping"
-          else
-            npm publish --provenance
-          fi

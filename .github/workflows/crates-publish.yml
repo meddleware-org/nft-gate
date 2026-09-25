@@ -1,0 +1,65 @@
+name: Publish (crates.io)
+
+# Publishes the gateway-rust crate to crates.io on a v* tag, gated on a
+# self-contained verify job (cargo test) against the exact tagged commit.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (gateway-rust tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway-rust
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          workspaces: "gateway-rust -> target"
+      - name: Test
+        run: cargo test
+
+  # ── Rust gateway: crates.io (cargo install distribution) ───────────────────
+  publish-crates:
+    name: crates.io (gateway-rust)
+    runs-on: ubuntu-latest
+    needs: verify
+    defaults:
+      run:
+        working-directory: gateway-rust
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "gateway-rust -> target"
+
+      - name: Check if already published
+        id: check
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "User-Agent: github-actions/nft-gate" \
+            "https://crates.io/api/v1/crates/nft-gate-gateway/$VERSION")
+          if [ "$HTTP" = "200" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::v$VERSION already on crates.io — skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to crates.io
+        if: steps.check.outputs.skip == 'false'
+        run: cargo publish --allow-dirty
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

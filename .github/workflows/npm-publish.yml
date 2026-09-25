@@ -1,0 +1,72 @@
+name: Publish (npm)
+
+# Publishes the Workers gateway source (@meddleware/nft-gate-gateway) to npmjs on
+# a v* tag, gated on a self-contained verify job against the exact tagged commit.
+# Uses npm OIDC trusted publishing — no long-lived NPM_TOKEN.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify (gateway-workers type-check + test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway-workers
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24'
+      - name: Install dependencies
+        run: npm ci
+      - name: Type-check
+        run: npm run type-check --if-present
+      - name: Test
+        run: npm run test --if-present
+
+  # ── Workers gateway: npmjs (source-distribution for forkers) ───────────────
+  # Uses OIDC trusted publisher — no static NPM_TOKEN secret required.
+  # IMPORTANT: configure @meddleware/nft-gate-gateway as a Trusted Publisher on
+  # npmjs.com (repo: meddleware-org/nft-gate, workflow: publish.yml) before
+  # removing continue-on-error. Until then, publish manually before pushing the
+  # tag — the version-check will skip cleanly once npm's CDN propagates.
+  publish-npm:
+    name: npmjs (@meddleware/nft-gate-gateway)
+    runs-on: ubuntu-latest
+    needs: verify
+    continue-on-error: true
+    permissions:
+      contents: read
+      id-token: write   # required for OIDC trusted publisher exchange
+    defaults:
+      run:
+        working-directory: gateway-workers
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Publish to npmjs (provenance via OIDC, idempotent)
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          # Use npm view (registry API) instead of curl (CDN) to avoid propagation-lag
+          # false negatives that cause the publish to be attempted when the version is
+          # already live but not yet reflected on the CDN.
+          if npm view "@meddleware/nft-gate-gateway@${VERSION}" version >/dev/null 2>&1; then
+            echo "::notice::v${VERSION} already published to npmjs — skipping"
+          else
+            npm publish --provenance
+          fi
