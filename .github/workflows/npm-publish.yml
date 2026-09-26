@@ -62,11 +62,22 @@ jobs:
       - name: Publish to npmjs (provenance via OIDC, idempotent)
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          # Use npm view (registry API) instead of curl (CDN) to avoid propagation-lag
-          # false negatives that cause the publish to be attempted when the version is
-          # already live but not yet reflected on the CDN.
-          if npm view "@meddleware/nft-gate-gateway@${VERSION}" version >/dev/null 2>&1; then
-            echo "::notice::v${VERSION} already published to npmjs — skipping"
+          NAME=$(node -p "require('./package.json').name")
+          ENC=$(printf '%s' "$NAME" | sed 's#/#%2f#')
+          # Check the registry directly — `npm view` can transiently miss a freshly
+          # first-published version and then attempt a re-publish. A 200 means it's live.
+          if [ "$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${ENC}/${VERSION}")" = "200" ]; then
+            echo "::notice::v${VERSION} already published to npmjs — skipping."
           else
-            npm publish --provenance
+            # Publish, but treat a "version already exists" error as success so a
+            # manually-published version (or a registry race) leaves the job green.
+            set +e; OUT=$(npm publish --provenance 2>&1); RC=$?; set -e
+            printf '%s\n' "$OUT"
+            if [ "$RC" -ne 0 ]; then
+              if printf '%s' "$OUT" | grep -qiE 'cannot publish over|previously published|EPUBLISHCONFLICT'; then
+                echo "::notice::v${VERSION} already published — treating as success."
+              else
+                exit "$RC"
+              fi
+            fi
           fi
