@@ -143,7 +143,7 @@ Then set `NONCE_BACKEND = "kv"` in `[vars]`.
 | Var | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream (set via `wrangler secret put`) |
-| `SUI_RPC_URL` | ✓ | `https://fullnode.testnet.sui.io:443` | Sui JSON-RPC endpoint; change to mainnet for production |
+| `SUI_RPC_URL` | ✓ | `https://fullnode.testnet.sui.io:443` | Sui fullnode (queried over gRPC-web); change to mainnet for production |
 | `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` or `SoulboundAccessNFT` (set via `wrangler secret put`) |
 | `GATE_ID` | | — | Restrict ownership checks to a specific gate registry object |
 | `SINGLE_USE` | | `false` | Require an on-chain `AccessConsumedEvent` bound to the nonce |
@@ -199,7 +199,7 @@ wrangler secret put CF_ACCOUNT_ID        # your Cloudflare account ID
 | `src/config.ts` | `config.rs` | `env` → typed config (same var names as Rust) |
 | `src/wire.ts` | `proof.rs` | Proof helpers reused from `@meddleware/nft-gate-client` |
 | `src/verify.ts` | `verify.rs` | Signature verification + allow/deny decision |
-| `src/chain.ts` | `sui_rpc.rs` | Sui JSON-RPC ownership and consume-event queries |
+| `src/chain.ts` | `sui_rpc.rs` | Sui gRPC ownership and consume-event queries |
 | `src/proxy.ts` | `proxy.rs` | Body-capped reverse proxy; strips `Host`/`Authorization` |
 | `src/state/` | `challenge.rs` + `ratelimit.rs` | Pluggable nonce store and rate limiter |
 | `src/quota.ts` | — | Optional free-tier quota guard (scheduled cron) |

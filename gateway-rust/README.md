@@ -86,7 +86,7 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 | Var | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream |
-| `SUI_RPC_URL` | ✓ | — | Sui JSON-RPC endpoint for ownership and event queries |
+| `SUI_RPC_URL` | ✓ | — | Sui fullnode (queried over gRPC-web) for ownership and event queries |
 | `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` (or the soulbound type) |
 | `GATE_ID` | | — | Restrict ownership checks to a specific gate registry object |
 | `SINGLE_USE` | | `false` | Require an on-chain `AccessConsumedEvent` bound to the nonce |
