@@ -77,7 +77,8 @@ export interface Config {
   /** Headers injected into every upstream relay request (e.g. CF Access service token). */
   upstreamAuthHeaders: Array<{ name: string; value: string }>
   nftType: string
-  gateId?: string
+  /** The access_gate `Gate` whose passes are accepted (required). */
+  gateId: string
   challengeTtlSecs: number
   singleUse: boolean
   publicPaths: string[]
@@ -148,8 +149,24 @@ function parseUpstreamAuthHeaders(v: string | undefined): Array<{ name: string; 
     .filter((h): h is { name: string; value: string } => h !== undefined)
 }
 
-/** Build the typed config from `env`. Throws if a required var is missing (fail fast). */
+/**
+ * `NFT_TYPE` must be an access_gate pass type: `<pkg>::access_gate::AccessNFT` or
+ * `…::SoulboundAccessNFT`. Anything else (a fungible `Coin<T>`, an arbitrary NFT) would gate on
+ * mere ownership of an object that access_gate never sold, so it is rejected at startup.
+ */
+const NFT_TYPE_RE = /^0x[0-9a-fA-F]{1,64}::access_gate::(?:AccessNFT|SoulboundAccessNFT)$/
+/** A Sui object ID. */
+const OBJECT_ID_RE = /^0x[0-9a-fA-F]{1,64}$/
+
+/** Build the typed config from `env`. Throws if a required var is missing or invalid (fail fast). */
 export function loadConfig(env: Env): Config {
+  const nftType = req(env, 'NFT_TYPE').trim()
+  if (!NFT_TYPE_RE.test(nftType)) {
+    throw new Error('NFT_TYPE must be <pkg>::access_gate::AccessNFT or <pkg>::access_gate::SoulboundAccessNFT')
+  }
+  const gateId = req(env, 'GATE_ID').trim()
+  if (!OBJECT_ID_RE.test(gateId)) throw new Error('GATE_ID must be a 0x-prefixed object ID')
+
   const backendRaw = (env.NONCE_BACKEND ?? 'durable-object').toLowerCase()
   const nonceBackend: NonceBackendKind = backendRaw === 'kv' ? 'kv' : 'durable-object'
   const shardRaw = (env.NONCE_SHARD ?? 'region').toLowerCase()
@@ -160,8 +177,8 @@ export function loadConfig(env: Env): Config {
     suiRpcUrl: req(env, 'SUI_RPC_URL'),
     suiRpcAuthHeader: parseAuthHeader(env.SUI_RPC_AUTH_HEADER),
     upstreamAuthHeaders: parseUpstreamAuthHeaders(env.UPSTREAM_AUTH_HEADERS),
-    nftType: req(env, 'NFT_TYPE'),
-    gateId: env.GATE_ID && env.GATE_ID.length > 0 ? env.GATE_ID : undefined,
+    nftType,
+    gateId,
     challengeTtlSecs: numOr(env.CHALLENGE_TTL_SECS, 300),
     singleUse: (env.SINGLE_USE ?? 'false').toLowerCase() === 'true',
     publicPaths: (env.PUBLIC_PATHS ?? '/v1/tip-config')

@@ -126,6 +126,12 @@ export interface ChainQuery {
    * — single-use is enforced by the redemption store keying on the digest.
    */
   consumeTxValid(consumeDigest: string, address: string, gateId?: string): Promise<boolean>
+  /**
+   * True if `gateId` is paused AND its immutable `GatePolicy` has `pause_blocks_access` — holders
+   * must then be denied until the gate is unpaused. False for gates without that policy flag
+   * (including gates of package versions that predate policies).
+   */
+  gateAccessBlocked(gateId: string): Promise<boolean>
 }
 
 /** The reason a request was rejected by {@link verifyAccessRequest}. Mirror of Rust `Denied`. */
@@ -136,6 +142,7 @@ export type Denied =
   | 'NotOwner'
   | 'ConsumeMissing'
   | 'RedeemConflict'
+  | 'GatePaused'
   | 'ChainError'
 
 /** A short, client-visible description of why access was denied. */
@@ -153,6 +160,8 @@ export function deniedReason(d: Denied): string {
       return 'no matching single-use consume for this address'
     case 'RedeemConflict':
       return 'this consume is already redeemed or an upload for it is in progress'
+    case 'GatePaused':
+      return 'the gate is paused'
     case 'ChainError':
       return 'on-chain verification failed'
   }
@@ -202,6 +211,16 @@ export async function verifyAccessRequest(
   if (!(await store.takeIfValid(proof.nonce))) {
     return { ok: false, denied: 'NonceInvalid' }
   }
+
+  // A gate whose policy has `pause_blocks_access` admits no one while paused. Checked before the
+  // single-use lease, so a consume made just before a pause stays redeemable after unpausing.
+  let blocked: boolean
+  try {
+    blocked = await chain.gateAccessBlocked(cfg.gateId)
+  } catch {
+    return { ok: false, denied: 'ChainError' }
+  }
+  if (blocked) return { ok: false, denied: 'GatePaused' }
 
   if (cfg.singleUse) {
     if (proof.consumeDigest === undefined) {

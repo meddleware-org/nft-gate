@@ -296,7 +296,7 @@ mod tests {
             upstream_url: "http://u".into(),
             sui_rpc_url: "http://r".into(),
             nft_type: "0x1::access_gate::AccessNFT".into(),
-            gate_id: None,
+            gate_id: "0x2".into(),
             challenge_ttl_secs: 300,
             single_use: false,
             public_paths: vec![],

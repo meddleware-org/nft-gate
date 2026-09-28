@@ -5,11 +5,12 @@
 //!
 //! Required:
 //! - `UPSTREAM_URL` — base URL of the upstream this gateway protects (trailing `/` stripped).
-//! - `SUI_RPC_URL` — Sui JSON-RPC endpoint for ownership / event queries.
-//! - `NFT_TYPE` — fully-qualified NFT type string, e.g. `<pkg>::access_gate::AccessNFT`.
+//! - `SUI_RPC_URL` — Sui fullnode (queried over gRPC-web) for ownership / event / gate queries.
+//! - `NFT_TYPE` — the access_gate pass type: `<pkg>::access_gate::AccessNFT` or
+//!   `<pkg>::access_gate::SoulboundAccessNFT` (anything else, e.g. a fungible `Coin<T>`, is rejected).
+//! - `GATE_ID` — the gate whose passes are accepted (object ID).
 //!
 //! Optional (with defaults):
-//! - `GATE_ID` — restrict ownership to a specific gate object (default: unset, any gate).
 //! - `CHALLENGE_TTL_SECS` — nonce lifetime in seconds (default: `300`).
 //! - `SINGLE_USE` — `true` to require an on-chain single-use consume (default: `false`).
 //! - `PUBLIC_PATHS` — comma-separated paths proxied without auth (default: `/v1/tip-config`).
@@ -36,12 +37,12 @@ pub struct GatewayConfig {
     pub bind_addr: SocketAddr,
     /// Base URL of the upstream this gateway protects (e.g. the stock upload relay).
     pub upstream_url: String,
-    /// Sui JSON-RPC endpoint used for ownership / event queries.
+    /// Sui fullnode (gRPC-web) used for ownership / event / gate queries.
     pub sui_rpc_url: String,
     /// Fully-qualified access-NFT type string to gate on.
     pub nft_type: String,
-    /// Optional gate object ID; when set, ownership must be for this specific gate.
-    pub gate_id: Option<String>,
+    /// The gate whose passes are accepted.
+    pub gate_id: String,
     /// Challenge validity window.
     pub challenge_ttl_secs: u64,
     /// When true, require an on-chain single-use consume bound to the challenge nonce.
@@ -82,8 +83,8 @@ impl GatewayConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if any required variable (`UPSTREAM_URL`, `SUI_RPC_URL`, `NFT_TYPE`) is
-    /// absent, or if `BIND_ADDR` cannot be parsed as a socket address.
+    /// Returns an error if any required variable (`UPSTREAM_URL`, `SUI_RPC_URL`, `NFT_TYPE`,
+    /// `GATE_ID`) is absent or invalid, or if `BIND_ADDR` cannot be parsed as a socket address.
     pub fn from_env() -> anyhow::Result<Self> {
         let bind_addr: SocketAddr = env_or("BIND_ADDR", "0.0.0.0:8080")
             .parse()
@@ -96,7 +97,19 @@ impl GatewayConfig {
             std::env::var("SUI_RPC_URL").map_err(|_| anyhow::anyhow!("SUI_RPC_URL is required"))?;
         let nft_type =
             std::env::var("NFT_TYPE").map_err(|_| anyhow::anyhow!("NFT_TYPE is required"))?;
-        let gate_id = std::env::var("GATE_ID").ok().filter(|s| !s.is_empty());
+        let nft_type = nft_type.trim().to_string();
+        if !is_access_gate_pass_type(&nft_type) {
+            anyhow::bail!(
+                "NFT_TYPE must be <pkg>::access_gate::AccessNFT or <pkg>::access_gate::SoulboundAccessNFT"
+            );
+        }
+        let gate_id = std::env::var("GATE_ID")
+            .map_err(|_| anyhow::anyhow!("GATE_ID is required"))?
+            .trim()
+            .to_string();
+        if !is_object_id(&gate_id) {
+            anyhow::bail!("GATE_ID must be a 0x-prefixed object ID");
+        }
         let challenge_ttl_secs = env_or("CHALLENGE_TTL_SECS", "300").parse().unwrap_or(300);
         let single_use = env_or("SINGLE_USE", "false").eq_ignore_ascii_case("true");
         let public_paths = env_or("PUBLIC_PATHS", "/v1/tip-config")
@@ -150,5 +163,54 @@ impl GatewayConfig {
     /// Returns `true` if `path` is in the configured public-paths list (proxied without auth).
     pub fn is_public_path(&self, path: &str) -> bool {
         self.public_paths.iter().any(|p| p == path)
+    }
+}
+
+/// `0x` followed by 1–64 hex digits.
+pub fn is_object_id(s: &str) -> bool {
+    match s.strip_prefix("0x") {
+        Some(h) => !h.is_empty() && h.len() <= 64 && h.bytes().all(|b| b.is_ascii_hexdigit()),
+        None => false,
+    }
+}
+
+/// `<pkg>::access_gate::AccessNFT` or `<pkg>::access_gate::SoulboundAccessNFT`. Gating on any other
+/// type (a fungible `Coin<T>`, an unrelated NFT) would admit holders of objects access_gate never
+/// sold, so it is rejected at startup.
+pub fn is_access_gate_pass_type(s: &str) -> bool {
+    let parts: Vec<&str> = s.split("::").collect();
+    parts.len() == 3
+        && is_object_id(parts[0])
+        && parts[1] == "access_gate"
+        && (parts[2] == "AccessNFT" || parts[2] == "SoulboundAccessNFT")
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_only_access_gate_pass_types() {
+        assert!(is_access_gate_pass_type("0x1::access_gate::AccessNFT"));
+        assert!(is_access_gate_pass_type(
+            "0xab::access_gate::SoulboundAccessNFT"
+        ));
+        for bad in [
+            "0x2::coin::Coin<0x2::sui::SUI>",
+            "0x1::other::AccessNFT",
+            "0x1::access_gate::Gate",
+            "AccessNFT",
+            "0xzz::access_gate::AccessNFT",
+        ] {
+            assert!(!is_access_gate_pass_type(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn object_ids_are_0x_hex() {
+        assert!(is_object_id("0x2"));
+        assert!(!is_object_id("0x"));
+        assert!(!is_object_id("gate"));
+        assert!(!is_object_id(&format!("0x{}", "a".repeat(65))));
     }
 }

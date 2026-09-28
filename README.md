@@ -35,6 +35,7 @@ npm run deploy
 # 4. Set the required secrets (run once after the Worker exists)
 wrangler secret put UPSTREAM_URL        # e.g. https://your-relay.example.com
 wrangler secret put NFT_TYPE            # e.g. 0x<pkg>::access_gate::SoulboundAccessNFT
+# …and set GATE_ID = "0x<gate id>" in wrangler.toml [vars]
 wrangler secret put UPSTREAM_AUTH_HEADERS  # e.g. CF-Access-Client-Id: <id>, CF-Access-Client-Secret: <secret>
 
 # 5. Configure the route (edit wrangler.toml, then redeploy)
@@ -53,12 +54,13 @@ docker pull meddleware/nft-gate-gateway:latest
 docker run -e UPSTREAM_URL=http://relay:8080 \
            -e SUI_RPC_URL=https://fullnode.mainnet.sui.io:443 \
            -e NFT_TYPE=0x<pkg>::access_gate::AccessNFT \
+           -e GATE_ID=0x<gate id> \
            -p 8080:8080 meddleware/nft-gate-gateway
 
 # Or from crates.io (requires Rust stable)
 cargo install nft-gate-gateway
 UPSTREAM_URL=http://relay:8080 SUI_RPC_URL=https://fullnode.mainnet.sui.io:443 \
-  NFT_TYPE=0x<pkg>::access_gate::AccessNFT nft-gate-gateway
+  NFT_TYPE=0x<pkg>::access_gate::AccessNFT GATE_ID=0x<gate id> nft-gate-gateway
 ```
 
 See [gateway-rust/README.md](gateway-rust/README.md) for the full configuration reference.
@@ -72,6 +74,12 @@ See [gateway-rust/README.md](gateway-rust/README.md) for the full configuration 
 **Proof token** — `base64(JSON { address, nonce, signature, consumeDigest? })`, sent as `Authorization: Bearer <token>` or `X-Access-Proof`.
 
 **Verification** — the gateway checks the signature recovers the claimed address, the nonce is fresh and unused, and the address owns the required NFT (or, in single-use mode, has submitted a matching on-chain consume transaction). Then it proxies to the upstream.
+
+**Scope** — the gateway gates only on `access_gate` passes of one gate (`NFT_TYPE` must be an
+`access_gate` pass type and `GATE_ID` is required), so every admitted user holds a pass that gate
+sold or granted. If the gate's immutable policy has `pause_blocks_access`, pausing the gate denies
+all holders (`403`) until it is unpaused; in single-use mode the check runs before the consume is
+redeemed, so no use is lost.
 
 ## Conformance
 

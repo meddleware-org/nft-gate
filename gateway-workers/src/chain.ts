@@ -125,6 +125,18 @@ export class SuiGrpc implements ChainQuery {
   }
 
   /**
+   * Live read of the gate: blocked while paused if its policy has `pause_blocks_access`. Not
+   * cached — pausing takes effect on the next request.
+   *
+   * @param gateId - The `Gate` shared object ID.
+   * @throws If the gate cannot be read (surfaces as ChainError → 502; fail closed).
+   */
+  async gateAccessBlocked(gateId: string): Promise<boolean> {
+    const { object } = await this.client.core.getObject({ objectId: gateId, include: { json: true } })
+    return gateBlocksAccess(object.json)
+  }
+
+  /**
    * Fetch a transaction by digest via gRPC, retrying briefly to absorb the window between the
    * client's finality wait and the gateway fullnode indexing the transaction.
    *
@@ -226,6 +238,15 @@ function eventFields(ev: Json): Json {
 }
 
 /** True if the event's type ends with `::access_gate::AccessConsumedEvent`. */
+/**
+ * True if a `Gate` object's JSON (gRPC core shape: fields flat) is paused and its policy has
+ * `pause_blocks_access`. Gates without a `policy` (pre-policy package versions) never block.
+ */
+export function gateBlocksAccess(gateJson: Json): boolean {
+  const g = gateJson as { paused?: unknown; policy?: { pause_blocks_access?: unknown } } | null
+  return Boolean(g && g.paused === true && g.policy && g.policy.pause_blocks_access === true)
+}
+
 export function isConsumedEvent(ev: Json): boolean {
   const t = eventType(ev)
   return t !== undefined && t.endsWith('::access_gate::AccessConsumedEvent')

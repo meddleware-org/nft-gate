@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { SuiGrpc, nonceMatches, isConsumedEvent, eventMatches } from '../src/chain.js'
+import { SuiGrpc, nonceMatches, isConsumedEvent, eventMatches, gateBlocksAccess } from '../src/chain.js'
 import { bytesToBase64 } from '../src/crypto.js'
 
 // Pure match/parse helpers — mirror sui_rpc.rs unit tests.
@@ -55,5 +55,25 @@ describe('chain helpers', () => {
   it('nonceMatches remains available for byte-array and base64 nonces', () => {
     expect(nonceMatches([110, 111, 110, 99, 101], 'nonce')).toBe(true)
     expect(nonceMatches(bytesToBase64(new TextEncoder().encode('x')), 'x')).toBe(true)
+  })
+})
+
+describe('gateBlocksAccess', () => {
+  const policy = (pauseBlocksAccess: boolean) => ({
+    freeze_requires_unpaused: false,
+    lock_commission_on_freeze: false,
+    pause_blocks_decryption: false,
+    pause_blocks_access: pauseBlocksAccess,
+  })
+
+  it('blocks only when paused AND the policy opts in', () => {
+    expect(gateBlocksAccess({ paused: true, policy: policy(true) })).toBe(true)
+    expect(gateBlocksAccess({ paused: false, policy: policy(true) })).toBe(false)
+    expect(gateBlocksAccess({ paused: true, policy: policy(false) })).toBe(false)
+  })
+
+  it('never blocks a gate without a policy (pre-policy package) or missing JSON', () => {
+    expect(gateBlocksAccess({ paused: true })).toBe(false)
+    expect(gateBlocksAccess(null)).toBe(false)
   })
 })

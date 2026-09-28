@@ -171,6 +171,7 @@ pub fn field_str(msg: &[u8], field: u32) -> Option<&str> {
 // depth-independent, so it never assumes BCS field order.
 
 const VALUE_STRING: u32 = 3;
+const VALUE_BOOL: u32 = 4;
 const VALUE_STRUCT: u32 = 5;
 const VALUE_LIST: u32 = 6;
 const STRUCT_FIELDS: u32 = 1;
@@ -221,6 +222,26 @@ fn struct_find_string(s: &[u8], key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The `Value` of the top-level field `key` of a Struct-valued `google.protobuf.Value` (no
+/// recursion — for reading a known object's own fields, e.g. a `Gate`'s `paused` / `policy`).
+pub fn value_field<'a>(value: &'a [u8], key: &str) -> Option<&'a [u8]> {
+    let s = field_bytes(value, VALUE_STRUCT)?;
+    ProtoReader::new(s).find_map(|f| match f {
+        Field::Len(STRUCT_FIELDS, entry) if field_str(entry, ENTRY_KEY) == Some(key) => {
+            field_bytes(entry, ENTRY_VALUE)
+        }
+        _ => None,
+    })
+}
+
+/// The `bool_value` of a `google.protobuf.Value`, if it holds one.
+pub fn value_as_bool(value: &[u8]) -> Option<bool> {
+    ProtoReader::new(value).find_map(|f| match f {
+        Field::Varint(VALUE_BOOL, v) => Some(v != 0),
+        _ => None,
+    })
 }
 
 // ── gRPC-web framing + transport ─────────────────────────────────────────────────────────────

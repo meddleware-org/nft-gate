@@ -6,6 +6,7 @@ const baseEnv: Env = {
   UPSTREAM_URL: 'https://relay-origin.example.com',
   SUI_RPC_URL: 'https://fullnode.testnet.sui.io:443',
   NFT_TYPE: '0x1::access_gate::AccessNFT',
+  GATE_ID: '0x2',
 }
 
 describe('loadConfig — UPSTREAM_AUTH_HEADERS', () => {
@@ -84,5 +85,25 @@ describe('loadConfig — ALLOWED_ORIGINS', () => {
       ALLOWED_ORIGINS: '  https://app.example.com , https://admin.example.com  ',
     })
     expect(cfg.allowedOrigins).toEqual(['https://app.example.com', 'https://admin.example.com'])
+  })
+})
+
+describe('loadConfig — NFT_TYPE and GATE_ID validation', () => {
+  it('accepts both access_gate pass types', () => {
+    expect(loadConfig(baseEnv).nftType).toBe('0x1::access_gate::AccessNFT')
+    expect(loadConfig({ ...baseEnv, NFT_TYPE: '0xab::access_gate::SoulboundAccessNFT' }).nftType).toBe(
+      '0xab::access_gate::SoulboundAccessNFT',
+    )
+  })
+
+  it('rejects a fungible coin or any non-access_gate type', () => {
+    for (const t of ['0x2::coin::Coin<0x2::sui::SUI>', '0x1::other::AccessNFT', '0x1::access_gate::Gate', 'AccessNFT']) {
+      expect(() => loadConfig({ ...baseEnv, NFT_TYPE: t })).toThrow(/NFT_TYPE/)
+    }
+  })
+
+  it('requires a GATE_ID object id', () => {
+    expect(() => loadConfig({ ...baseEnv, GATE_ID: '' })).toThrow(/GATE_ID/)
+    expect(() => loadConfig({ ...baseEnv, GATE_ID: 'gate' })).toThrow(/GATE_ID/)
   })
 })

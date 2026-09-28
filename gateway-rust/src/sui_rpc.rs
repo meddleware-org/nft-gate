@@ -9,7 +9,8 @@
 //! so an interrupted upload can resume with a fresh challenge while reusing the same consume.
 
 use crate::grpc::{
-    field_bytes, field_str, value_find_string, Field, GrpcWeb, ProtoReader, ProtoWriter,
+    field_bytes, field_str, value_as_bool, value_field, value_find_string, Field, GrpcWeb,
+    ProtoReader, ProtoWriter,
 };
 use crate::http_client::HttpClient;
 use crate::verify::ChainQuery;
@@ -20,6 +21,13 @@ use std::time::{Duration, Instant};
 // ── pinned sui.rpc.v2 field numbers (validated against live responses) ───────────────────────
 const LEDGER_GET_TRANSACTION: &str = "sui.rpc.v2.LedgerService/GetTransaction";
 const STATE_LIST_OWNED_OBJECTS: &str = "sui.rpc.v2.StateService/ListOwnedObjects";
+const LEDGER_GET_OBJECT: &str = "sui.rpc.v2.LedgerService/GetObject";
+
+// GetObjectRequest { object_id = 1; version = 2; FieldMask read_mask = 3 }
+const GO_OBJECT_ID: u32 = 1;
+const GO_READ_MASK: u32 = 3;
+// GetObjectResponse { Object object = 1 }
+const GO_OBJECT: u32 = 1;
 
 // GetTransactionRequest { digest = 1; FieldMask read_mask = 2 { repeated string paths = 1 } }
 const REQ_DIGEST: u32 = 1;
@@ -95,6 +103,28 @@ impl SuiRpc {
             .await?;
         Ok(response_has_owned(&resp, gate_id))
     }
+}
+
+/// True if a `Gate`'s JSON (`google.protobuf.Value`) is paused AND its `policy` has
+/// `pause_blocks_access`. A gate without a `policy` (pre-policy package version) never blocks.
+pub fn gate_blocks_access(json: &[u8]) -> bool {
+    let paused = value_field(json, "paused")
+        .and_then(value_as_bool)
+        .unwrap_or(false);
+    let blocks = value_field(json, "policy")
+        .and_then(|p| value_field(p, "pause_blocks_access"))
+        .and_then(value_as_bool)
+        .unwrap_or(false);
+    paused && blocks
+}
+
+/// Parse a `GetObjectResponse` for a gate; errors (fail closed) if the object or its JSON is absent.
+fn response_gate_blocks_access(resp: &[u8]) -> anyhow::Result<bool> {
+    let object =
+        field_bytes(resp, GO_OBJECT).ok_or_else(|| anyhow::anyhow!("gate object not found"))?;
+    let json = field_bytes(object, OBJECT_JSON)
+        .ok_or_else(|| anyhow::anyhow!("gate object has no json"))?;
+    Ok(gate_blocks_access(json))
 }
 
 /// Build the `GetTransactionRequest` for `digest`, requesting only the events.
@@ -187,6 +217,17 @@ impl ChainQuery for SuiRpc {
             return Ok(owns);
         }
         self.owns_nft_live(address, nft_type, gate_id).await
+    }
+
+    async fn gate_access_blocked(&self, gate_id: &str) -> anyhow::Result<bool> {
+        // Live read (not cached) so pausing takes effect on the next request.
+        let mut mask = ProtoWriter::new();
+        mask.string_field(FIELDMASK_PATHS, "json");
+        let mut req = ProtoWriter::new();
+        req.string_field(GO_OBJECT_ID, gate_id);
+        req.bytes_field(GO_READ_MASK, &mask.into_bytes());
+        let resp = self.grpc.call(LEDGER_GET_OBJECT, req.into_bytes()).await?;
+        response_gate_blocks_access(&resp)
     }
 
     async fn consume_tx_valid(
@@ -328,5 +369,59 @@ mod tests {
             .consume_tx_valid(digest, addr, Some("0xdead"))
             .await
             .unwrap());
+    }
+
+    // ── gate_blocks_access ──────────────────────────────────────────────────────────────────
+
+    /// A struct `Value` from (key, Value-bytes) entries.
+    fn struct_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut s = ProtoWriter::new();
+        for (k, v) in entries {
+            let mut entry = ProtoWriter::new();
+            entry.string_field(1, k);
+            entry.bytes_field(2, v);
+            s.bytes_field(1, &entry.into_bytes());
+        }
+        let mut value = ProtoWriter::new();
+        value.bytes_field(5, &s.into_bytes());
+        value.into_bytes()
+    }
+
+    fn bool_value(b: bool) -> Vec<u8> {
+        let mut v = ProtoWriter::new();
+        v.uint_field(4, u64::from(b)); // bool_value
+        v.into_bytes()
+    }
+
+    fn gate_json(paused: bool, policy: Option<bool>) -> Vec<u8> {
+        let mut entries = vec![("paused", bool_value(paused))];
+        if let Some(blocks) = policy {
+            entries.push((
+                "policy",
+                struct_of(&[
+                    ("pause_blocks_decryption", bool_value(false)),
+                    ("pause_blocks_access", bool_value(blocks)),
+                ]),
+            ));
+        }
+        struct_of(&entries)
+    }
+
+    #[test]
+    fn gate_blocks_only_when_paused_and_policy_opts_in() {
+        assert!(gate_blocks_access(&gate_json(true, Some(true))));
+        assert!(!gate_blocks_access(&gate_json(false, Some(true))));
+        assert!(!gate_blocks_access(&gate_json(true, Some(false))));
+        assert!(!gate_blocks_access(&gate_json(true, None))); // pre-policy gate
+    }
+
+    #[test]
+    fn get_object_response_without_object_fails_closed() {
+        assert!(response_gate_blocks_access(&[]).is_err());
+        let mut obj = ProtoWriter::new();
+        obj.bytes_field(OBJECT_JSON, &gate_json(true, Some(true)));
+        let mut resp = ProtoWriter::new();
+        resp.bytes_field(GO_OBJECT, &obj.into_bytes());
+        assert!(response_gate_blocks_access(&resp.into_bytes()).unwrap());
     }
 }

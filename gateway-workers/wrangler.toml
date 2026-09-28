@@ -45,6 +45,11 @@ compatibility_flags = ["nodejs_compat"]
 # Public fullnode — safe to keep as a plain var (no sensitive information).
 SUI_RPC_URL = "https://fullnode.testnet.sui.io:443"
 
+# Required: the gate whose passes are accepted. This is the live testnet relay gate on the
+# pre-policy access_gate 0x0bedd0…; switch to the policy-aware gate
+# 0xcb8206cab55902247daba61bad3d6c92f072425fe4034a98d6a22400d25a5f50 (package 0x1a81ca…, with
+# NFT_TYPE = 0x1a81ca…::access_gate::SoulboundAccessNFT) together with the walrus-ui release that
+# targets the new package — never one without the other.
 GATE_ID = "0x0485c1fa80e4c355c85ab99c0281a328d8fb5c60ac50ab64f10be0f8be792aba"
 SINGLE_USE = "true"
 PUBLIC_PATHS = "/v1/tip-config"

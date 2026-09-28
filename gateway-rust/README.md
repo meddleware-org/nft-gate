@@ -31,6 +31,7 @@ docker run \
   -e UPSTREAM_URL=http://your-relay:8080 \
   -e SUI_RPC_URL=https://fullnode.mainnet.sui.io:443 \
   -e NFT_TYPE=0x<PACKAGE_ID>::access_gate::AccessNFT \
+  -e GATE_ID=0x<GATE_ID> \
   -p 8080:8080 \
   meddleware/nft-gate-gateway
 ```
@@ -43,6 +44,7 @@ docker run \
   -e UPSTREAM_URL=http://your-relay:8080 \
   -e SUI_RPC_URL=https://fullnode.mainnet.sui.io:443 \
   -e NFT_TYPE=0x<PACKAGE_ID>::access_gate::AccessNFT \
+  -e GATE_ID=0x<GATE_ID> \
   -e REDIS_URL=redis://redis:6379 \
   -p 8080:8080 \
   meddleware/nft-gate-gateway
@@ -56,6 +58,7 @@ cargo install nft-gate-gateway
 UPSTREAM_URL=http://your-relay:8080 \
 SUI_RPC_URL=https://fullnode.mainnet.sui.io:443 \
 NFT_TYPE=0x<PACKAGE_ID>::access_gate::AccessNFT \
+GATE_ID=0x<GATE_ID> \
 nft-gate-gateway
 ```
 
@@ -69,6 +72,7 @@ cargo build --release
 UPSTREAM_URL=http://your-relay:8080 \
 SUI_RPC_URL=https://fullnode.mainnet.sui.io:443 \
 NFT_TYPE=0x<PACKAGE_ID>::access_gate::AccessNFT \
+GATE_ID=0x<GATE_ID> \
 ./target/release/nft-gate-gateway
 ```
 
@@ -87,8 +91,8 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 | --- | --- | --- | --- |
 | `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream |
 | `SUI_RPC_URL` | ✓ | — | Sui fullnode (queried over gRPC-web) for ownership and event queries |
-| `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` (or the soulbound type) |
-| `GATE_ID` | | — | Restrict ownership checks to a specific gate registry object |
+| `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` (or the soulbound type); any other type — e.g. a fungible `Coin<T>` — is rejected at startup |
+| `GATE_ID` | ✓ | — | The gate whose passes are accepted; also read live so a paused gate with `pause_blocks_access` denies holders (`403 the gate is paused`) |
 | `SINGLE_USE` | | `false` | Require an on-chain `AccessConsumedEvent` bound to the nonce |
 | `PUBLIC_PATHS` | | `/v1/tip-config` | Comma-separated paths served without authentication |
 | `CHALLENGE_TTL_SECS` | | `300` | Nonce lifetime in seconds |

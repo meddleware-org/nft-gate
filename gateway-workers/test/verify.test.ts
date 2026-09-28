@@ -81,6 +81,7 @@ class MockChain implements ChainQuery {
   constructor(
     private owns: boolean,
     private consumed: boolean,
+    private blocked: boolean = false,
   ) {}
   async ownsNft() {
     return this.owns
@@ -88,13 +89,17 @@ class MockChain implements ChainQuery {
   async consumeTxValid() {
     return this.consumed
   }
+  async gateAccessBlocked() {
+    return this.blocked
+  }
 }
 
 function cfg(singleUse: boolean): Config {
   return {
     upstreamUrl: 'http://upstream',
     suiRpcUrl: 'http://rpc',
-    nftType: '0xpkg::access_gate::AccessNFT',
+    nftType: '0x1::access_gate::AccessNFT',
+    gateId: '0x2',
     challengeTtlSecs: 300,
     singleUse,
     publicPaths: ['/v1/tip-config'],
@@ -225,5 +230,34 @@ describe('verifyAccessRequest decision', () => {
     const b7 = ed25519Token(7, 'n7') // no consumeDigest
     const res = await verifyAccessRequest(cfg(true), store, b7.token, new MockChain(true, true))
     expect(res).toEqual({ ok: false, denied: 'ConsumeMissing' })
+  })
+
+  it('denies an owner while the gate is paused with pause_blocks_access', async () => {
+    const store = new FakeBackend()
+    store.issueSpecific('p1')
+    const b = ed25519Token(7, 'p1')
+    const res = await verifyAccessRequest(cfg(false), store, b.token, new MockChain(true, false, true))
+    expect(res).toEqual({ ok: false, denied: 'GatePaused' })
+  })
+
+  it('single-use: a paused gate denies before the consume is redeemed', async () => {
+    const store = new FakeBackend()
+    store.issueSpecific('p2')
+    const b = ed25519Token(7, 'p2', '0xdigest')
+    const res = await verifyAccessRequest(cfg(true), store, b.token, new MockChain(true, true, true))
+    // No redemptionKey is returned, so the dispatcher never leases the consume: it stays redeemable.
+    expect(res).toEqual({ ok: false, denied: 'GatePaused' })
+  })
+
+  it('treats a failed gate read as a chain error (fail closed)', async () => {
+    const store = new FakeBackend()
+    store.issueSpecific('p3')
+    const b = ed25519Token(7, 'p3')
+    const chain = new MockChain(true, false)
+    chain.gateAccessBlocked = async () => {
+      throw new Error('rpc down')
+    }
+    const res = await verifyAccessRequest(cfg(false), store, b.token, chain)
+    expect(res).toEqual({ ok: false, denied: 'ChainError' })
   })
 })

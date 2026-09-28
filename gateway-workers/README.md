@@ -144,8 +144,8 @@ Then set `NONCE_BACKEND = "kv"` in `[vars]`.
 | --- | --- | --- | --- |
 | `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream (set via `wrangler secret put`) |
 | `SUI_RPC_URL` | ✓ | `https://fullnode.testnet.sui.io:443` | Sui fullnode (queried over gRPC-web); change to mainnet for production |
-| `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` or `SoulboundAccessNFT` (set via `wrangler secret put`) |
-| `GATE_ID` | | — | Restrict ownership checks to a specific gate registry object |
+| `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` or `SoulboundAccessNFT` (set via `wrangler secret put`); any other type — e.g. a fungible `Coin<T>` — is rejected at startup |
+| `GATE_ID` | ✓ | — | The gate whose passes are accepted; also read live so a paused gate with `pause_blocks_access` denies holders (`403 the gate is paused`) |
 | `SINGLE_USE` | | `false` | Require an on-chain `AccessConsumedEvent` bound to the nonce |
 | `PUBLIC_PATHS` | | `/v1/tip-config` | Comma-separated paths served without authentication |
 | `RATE_LIMIT_PER_MIN` | | `30` | Requests per verified address per 60s window (`0` disables) |

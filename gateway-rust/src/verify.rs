@@ -192,6 +192,10 @@ pub trait ChainQuery {
         address: &str,
         gate_id: Option<&str>,
     ) -> anyhow::Result<bool>;
+
+    /// Is `gate_id` paused AND does its immutable `GatePolicy` have `pause_blocks_access`? Holders
+    /// are then denied until the gate is unpaused. False for gates without that policy flag.
+    async fn gate_access_blocked(&self, gate_id: &str) -> anyhow::Result<bool>;
 }
 
 /// Reason a request was rejected by [`verify_access_request`].
@@ -209,6 +213,8 @@ pub enum Denied {
     ConsumeMissing,
     /// The consume has already been redeemed for an upload, or one is in progress (single-use).
     RedeemConflict,
+    /// The gate is paused and its policy has `pause_blocks_access`.
+    GatePaused,
     /// An on-chain query failed; the gateway returns 502 for this variant.
     ChainError,
 }
@@ -225,6 +231,7 @@ impl Denied {
             Denied::RedeemConflict => {
                 "this consume is already redeemed or an upload for it is in progress"
             }
+            Denied::GatePaused => "the gate is paused",
             Denied::ChainError => "on-chain verification failed",
         }
     }
@@ -267,6 +274,16 @@ pub async fn verify_access_request<C: ChainQuery>(
         return Err(Denied::NonceInvalid);
     }
 
+    // A gate whose policy has `pause_blocks_access` admits no one while paused. Checked before the
+    // single-use lease, so a consume made just before a pause stays redeemable after unpausing.
+    let blocked = chain
+        .gate_access_blocked(&cfg.gate_id)
+        .await
+        .map_err(|_| Denied::ChainError)?;
+    if blocked {
+        return Err(Denied::GatePaused);
+    }
+
     if cfg.single_use {
         // A single-use client MUST first submit an on-chain consume and include its digest;
         // its absence signals a misconfigured/replaying client.
@@ -274,7 +291,7 @@ pub async fn verify_access_request<C: ChainQuery>(
             return Err(Denied::ConsumeMissing);
         };
         let ok = chain
-            .consume_tx_valid(digest, &address, cfg.gate_id.as_deref())
+            .consume_tx_valid(digest, &address, Some(cfg.gate_id.as_str()))
             .await
             .map_err(|_| Denied::ChainError)?;
         if !ok {
@@ -289,7 +306,7 @@ pub async fn verify_access_request<C: ChainQuery>(
     }
 
     let ok = chain
-        .owns_nft(&address, &cfg.nft_type, cfg.gate_id.as_deref())
+        .owns_nft(&address, &cfg.nft_type, Some(cfg.gate_id.as_str()))
         .await
         .map_err(|_| Denied::ChainError)?;
     if !ok {
@@ -514,6 +531,7 @@ mod tests {
     struct MockChain {
         owns: bool,
         consumed: bool,
+        blocked: bool,
     }
     impl ChainQuery for MockChain {
         async fn owns_nft(&self, _a: &str, _t: &str, _g: Option<&str>) -> anyhow::Result<bool> {
@@ -527,6 +545,9 @@ mod tests {
         ) -> anyhow::Result<bool> {
             Ok(self.consumed)
         }
+        async fn gate_access_blocked(&self, _g: &str) -> anyhow::Result<bool> {
+            Ok(self.blocked)
+        }
     }
 
     fn cfg(single_use: bool) -> GatewayConfig {
@@ -534,8 +555,8 @@ mod tests {
             bind_addr: "0.0.0.0:8080".parse().unwrap(),
             upstream_url: "http://upstream".into(),
             sui_rpc_url: "http://rpc".into(),
-            nft_type: "0xpkg::access_gate::AccessNFT".into(),
-            gate_id: None,
+            nft_type: "0x1::access_gate::AccessNFT".into(),
+            gate_id: "0x2".into(),
             challenge_ttl_secs: 300,
             single_use,
             public_paths: vec!["/v1/tip-config".into()],
@@ -564,6 +585,7 @@ mod tests {
             &MockChain {
                 owns: true,
                 consumed: false,
+                blocked: false,
             },
         )
         .await;
@@ -585,6 +607,7 @@ mod tests {
             &MockChain {
                 owns: false,
                 consumed: false,
+                blocked: false,
             },
         )
         .await;
@@ -604,6 +627,7 @@ mod tests {
             &MockChain {
                 owns: true,
                 consumed: false,
+                blocked: false,
             },
         )
         .await;
@@ -616,6 +640,7 @@ mod tests {
             &MockChain {
                 owns: true,
                 consumed: false,
+                blocked: false,
             },
         )
         .await;
@@ -643,6 +668,7 @@ mod tests {
             &MockChain {
                 owns: true,
                 consumed: false,
+                blocked: false,
             },
         )
         .await;
@@ -663,6 +689,7 @@ mod tests {
             &MockChain {
                 owns: true,
                 consumed: false,
+                blocked: false,
             },
         )
         .await;
@@ -677,6 +704,7 @@ mod tests {
             &MockChain {
                 owns: false,
                 consumed: true,
+                blocked: false,
             },
         )
         .await;
@@ -699,9 +727,41 @@ mod tests {
             &MockChain {
                 owns: true,
                 consumed: true,
+                blocked: false,
             },
         )
         .await;
         assert_eq!(res.unwrap_err(), Denied::ConsumeMissing);
+    }
+
+    #[tokio::test]
+    async fn denies_owner_while_gate_paused_with_access_policy() {
+        let (sk, address) = keypair();
+        let store = NonceStore::in_memory(300, 10_000);
+        let (nonce, _) = store.issue_specific("paused-1").await;
+        let token = build_token(&sk, &address, &nonce, None);
+        let chain = MockChain {
+            owns: true,
+            consumed: false,
+            blocked: true,
+        };
+        let res = verify_access_request(&cfg(false), &store, &token, &chain).await;
+        assert_eq!(res.unwrap_err(), Denied::GatePaused);
+    }
+
+    #[tokio::test]
+    async fn single_use_paused_gate_denies_before_redemption() {
+        let (sk, address) = keypair();
+        let store = NonceStore::in_memory(300, 10_000);
+        let (nonce, _) = store.issue_specific("paused-2").await;
+        let token = build_token(&sk, &address, &nonce, Some("0xdigest"));
+        let chain = MockChain {
+            owns: true,
+            consumed: true,
+            blocked: true,
+        };
+        let res = verify_access_request(&cfg(true), &store, &token, &chain).await;
+        // No redemption key is produced, so the consume is never leased and stays redeemable.
+        assert_eq!(res.unwrap_err(), Denied::GatePaused);
     }
 }
