@@ -138,6 +138,29 @@ wrangler kv namespace create NONCE_KV
 
 Then set `NONCE_BACKEND = "kv"` in `[vars]`.
 
+## Request body limit
+
+`MAX_BODY_BYTES` is enforced twice, without buffering the body:
+
+1. **Declared length.** A `Content-Length` above the cap gets `413 {"error":"request body too large"}`
+   before the upstream is contacted.
+2. **Streamed bytes.** Every body passes through a byte counter. A body with no declared length
+   (`Transfer-Encoding: chunked`) that crosses the cap aborts the upstream request and gets the
+   same `413`. Bodies within the cap are forwarded unchanged, still `Content-Length`-framed when the
+   client declared one.
+
+The **effective limit is the lower of `MAX_BODY_BYTES` and the zone's Cloudflare plan limit** on
+request bodies (Free/Pro 100 MB, Business 200 MB, Enterprise configurable up to 5 GB — see
+[Workers limits](https://developers.cloudflare.com/workers/platform/limits/#request-and-response-limits)).
+The deployed value, `104857600` (100 MiB), is at the Free/Pro plan limit, so the edge may reject an
+oversized upload first — with Cloudflare's own `413`, not the gateway's JSON body. Raising
+`MAX_BODY_BYTES` has no effect beyond the plan limit. Keep the relay origin's own cap
+(e.g. `nginx.org/client-max-body-size` on its ingress) at least as large, so the gateway, not the origin, is the
+binding limit.
+
+The Rust gateway enforces the same cap with the same status codes (see
+[`gateway-rust`](../gateway-rust/README.md)).
+
 ## Full configuration reference
 
 | Var | Required | Default | Notes |
@@ -149,7 +172,7 @@ Then set `NONCE_BACKEND = "kv"` in `[vars]`.
 | `SINGLE_USE` | | `false` | Require an on-chain `AccessConsumedEvent` bound to the nonce |
 | `PUBLIC_PATHS` | | `/v1/tip-config` | Comma-separated paths served without authentication |
 | `RATE_LIMIT_PER_MIN` | | `30` | Requests per verified address per 60s window (`0` disables) |
-| `MAX_BODY_BYTES` | | `262144` | Request body cap before proxying (256 KiB) |
+| `MAX_BODY_BYTES` | | `262144` | Request body cap (256 KiB); `wrangler.toml` sets `104857600` (100 MiB) for Walrus uploads. See [Request body limit](#request-body-limit) |
 | `CHALLENGE_TTL_SECS` | | `300` | Nonce lifetime in seconds |
 | `OWNERSHIP_CACHE_TTL_MS` | | `0` | Ownership-check cache TTL (`0` = live check on every request) |
 | `NONCE_BACKEND` | | `durable-object` | `durable-object` or `kv` |

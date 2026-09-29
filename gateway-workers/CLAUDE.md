@@ -134,6 +134,12 @@ propagate to both Workers and Rust test suites.
 
 ## Invariants
 
+- **Body cap without buffering.** `proxy.ts` rejects a declared `Content-Length` over
+  `MAX_BODY_BYTES` up front, and streams every body through `limitBody` (a counting
+  `TransformStream`) that aborts the upstream fetch past the cap → `413`. Never read the body into
+  memory. Declared-length bodies are re-framed with `FixedLengthStream` so the upstream still sees
+  `Content-Length`. The effective limit is `min(MAX_BODY_BYTES, Cloudflare plan limit)` — 100 MB
+  on Free/Pro — see README "Request body limit". Tests: `test/proxy.test.ts` (workerd).
 - `index.ts` must export `NonceRateState` (the Durable Object class) for Wrangler's DO migration
   to work. Do not rename or split this export.
 - `crypto.ts` uses `atob`/`btoa` (present in the Workers runtime, not in Node.js without a

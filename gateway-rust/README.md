@@ -97,7 +97,7 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 | `PUBLIC_PATHS` | | `/v1/tip-config` | Comma-separated paths served without authentication |
 | `CHALLENGE_TTL_SECS` | | `300` | Nonce lifetime in seconds |
 | `RATE_LIMIT_PER_MIN` | | `30` | Per-address request budget per 60s window (`0` disables) |
-| `MAX_BODY_BYTES` | | `262144` | Request body cap before proxying (256 KiB) |
+| `MAX_BODY_BYTES` | | `262144` | Request body cap (256 KiB); see [Request body limit](#request-body-limit) |
 | `BIND_ADDR` | | `0.0.0.0:8080` | TCP listen address |
 | `REDIS_URL` | | — | Redis/Dragonfly URL for a shared nonce store (required for `replicas > 1`) |
 | `NONCE_MAX_ENTRIES` | | `1000000` | Hard cap on in-memory nonce entries (evict oldest when reached) |
@@ -113,6 +113,26 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 
 For production, use an operator-run fullnode or a dedicated RPC provider rather than a public
 fullnode, to avoid rate limits and avoid leaking access patterns.
+
+## Request body limit
+
+Same contract as `gateway-workers`: a declared `Content-Length` over `MAX_BODY_BYTES` gets
+`413 {"error":"request body too large"}` before any byte is read, and a body without a declared
+length (chunked) is read only up to the cap, then gets the same `413`. Upstream failures are `502`.
+
+**Memory.** Unlike the Workers gateway, this one buffers: the request body is collected in full
+before it is forwarded, and the upstream response is collected before it is returned. Per in-flight
+gated request, expect about `MAX_BODY_BYTES` (transiently up to ~2× while a multi-chunk body is
+joined into one buffer) plus the response size. There is no concurrency cap, so peak memory scales
+with concurrent uploads — at the 100 MiB value used in front of the Walrus relay, 10 simultaneous
+maximum uploads need roughly 1–2 GiB. Size the container's memory limit (and `MAX_BODY_BYTES`)
+for the concurrency you expect.
+
+**Follow-up (not implemented):** stream both directions — pass the request body to the hyper
+client as a length-limited stream (`http_body_util::Limited`) instead of `to_bytes`, and return the
+upstream `Incoming` body directly — so memory stays at one chunk per request regardless of size.
+Until then, a `tower::limit::ConcurrencyLimitLayer` on the gated route is the cheap way to bound
+peak memory.
 
 ## Signature scheme support
 

@@ -9,7 +9,7 @@ import { defineConfig } from 'vitest/config'
  *   pool. No Cloudflare runtime dependency; always safe in CI (`npm test`).
  *
  * cloudflare-integration (local dev):
- *   Runs router and state tests inside the real `workerd` runtime via
+ *   Runs router, state and proxy (body-limit) tests inside the real `workerd` runtime via
  *   @cloudflare/vitest-pool-workers. Requires Durable Objects + KV bindings.
  *   Run with: npm run test:integration
  *
@@ -55,7 +55,7 @@ export default defineConfig({
         ],
         test: {
           name: 'cloudflare-integration',
-          include: ['test/router.test.ts', 'test/state.test.ts'],
+          include: ['test/router.test.ts', 'test/state.test.ts', 'test/proxy.test.ts'],
         },
       },
     ],
