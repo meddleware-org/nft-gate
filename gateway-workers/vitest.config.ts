@@ -1,4 +1,4 @@
-import { cloudflarePool } from '@cloudflare/vitest-pool-workers'
+import { cloudflareTest } from '@cloudflare/vitest-pool-workers'
 import { defineConfig } from 'vitest/config'
 
 /**
@@ -33,9 +33,9 @@ export default defineConfig({
         },
       },
       {
-        test: {
-          name: 'cloudflare-integration',
-          pool: cloudflarePool({
+        // The plugin (not a bare `pool`) also registers the `cloudflare:test` module resolution.
+        plugins: [
+          cloudflareTest({
             wrangler: { configPath: './wrangler.toml' },
             miniflare: {
               // NONCE_KV: wrangler.toml keeps this commented out for prod (DO is the primary
@@ -45,10 +45,16 @@ export default defineConfig({
               bindings: {
                 UPSTREAM_URL: 'https://upstream.invalid',
                 SUI_RPC_URL: 'https://rpc.invalid',
+                // A `wrangler secret` in production; required by the config loader.
+                NFT_TYPE:
+                  '0x1a81ca177db039585e575beeeee4759466e55910e936a6733e38dbb65025eea4::access_gate::SoulboundAccessNFT',
                 ALLOWED_ORIGINS: 'https://allowed.example.com,https://sui-walrus.meddleware.co.uk',
               },
             },
           }),
+        ],
+        test: {
+          name: 'cloudflare-integration',
           include: ['test/router.test.ts', 'test/state.test.ts'],
         },
       },
