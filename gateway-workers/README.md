@@ -78,7 +78,7 @@ wrangler secret put NFT_TYPE
 # CF Access service-token headers to authenticate to your origin (if Access-locked).
 # Omit if your upstream is publicly reachable or uses another auth mechanism.
 wrangler secret put UPSTREAM_AUTH_HEADERS
-# Value: CF-Access-Client-Id: <id>, CF-Access-Client-Secret: <secret>
+# Value (JSON): [{"name":"CF-Access-Client-Id","value":"<id>"},{"name":"CF-Access-Client-Secret","value":"<secret>"}]
 ```
 
 Secrets are encrypted at rest and never appear in `wrangler.toml` or workflow logs. They survive
@@ -106,11 +106,12 @@ locked to this Worker via Cloudflare Access, then point `UPSTREAM_URL` at it.
 1. Cloudflare Zero Trust → Access → Service Tokens → **Create Service Token**.
 2. Create an Access **application** for your relay hostname (e.g. `relay.example.com`).
 3. Add a policy: allow requests where **Service Token** is the token you just created.
-4. Set the Worker secret — both token headers, comma-separated:
+4. Set the Worker secret — both token headers, as a JSON array (a malformed value makes the
+   gateway fail closed with `500 gateway misconfigured` until it is fixed):
 
    ```bash
    wrangler secret put UPSTREAM_AUTH_HEADERS
-   # CF-Access-Client-Id: <id>, CF-Access-Client-Secret: <secret>
+   # [{"name":"CF-Access-Client-Id","value":"<id>"},{"name":"CF-Access-Client-Secret","value":"<secret>"}]
    ```
 
 5. The Worker injects these headers on every upstream `fetch`. Direct browser or bot traffic to
@@ -169,7 +170,7 @@ The Rust gateway enforces the same cap with the same status codes (see
 | `SUI_RPC_URL` | ✓ | `https://fullnode.testnet.sui.io:443` | Sui fullnode (queried over gRPC-web); change to mainnet for production |
 | `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` or `SoulboundAccessNFT` (set via `wrangler secret put`); any other type — e.g. a fungible `Coin<T>` — is rejected at startup |
 | `GATE_ID` | ✓ | — | The gate whose passes are accepted; also read live so a paused gate with `pause_blocks_access` denies holders (`403 the gate is paused`) |
-| `SINGLE_USE` | | `false` | Require an on-chain `AccessConsumedEvent` bound to the nonce |
+| `SINGLE_USE` | | `false` | Require a `consumeDigest` naming a successful `access_gate::consume` by the proof address on `GATE_ID`; each digest is redeemable once |
 | `PUBLIC_PATHS` | | `/v1/tip-config` | Comma-separated paths served without authentication |
 | `RATE_LIMIT_PER_MIN` | | `30` | Requests per verified address per 60s window (`0` disables) |
 | `MAX_BODY_BYTES` | | `262144` | Request body cap (256 KiB); `wrangler.toml` sets `104857600` (100 MiB) for Walrus uploads. See [Request body limit](#request-body-limit) |
@@ -178,7 +179,8 @@ The Rust gateway enforces the same cap with the same status codes (see
 | `NONCE_BACKEND` | | `durable-object` | `durable-object` or `kv` |
 | `NONCE_SHARD` | | `region` | DO shard granularity: `region` (near users) or `global` (one instance) |
 | `NONCE_MAX_ENTRIES` | | `1000000` | Hard nonce entry cap per DO shard (evict oldest when reached) |
-| `UPSTREAM_AUTH_HEADERS` | | — | Comma-separated `Name: value` pairs injected on every upstream request (secret) |
+| `UPSTREAM_AUTH_HEADERS` | | — | JSON array `[{"name":…,"value":…}]` of headers injected on every upstream request (secret); invalid JSON fails closed |
+| `CHALLENGE_RATE_LIMIT_PER_MIN` | | `30` | Per-client-IP budget for `GET /v1/challenge` (0 disables) |
 | `SUI_RPC_AUTH_HEADER` | | — | `Name: value` header added to Sui RPC calls (secret, for authenticated nodes) |
 | `QUOTA_GUARD_ENABLED` | | `false` | Enable the scheduled free-tier quota guard |
 

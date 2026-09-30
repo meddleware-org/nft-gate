@@ -20,42 +20,34 @@ describe('loadConfig — UPSTREAM_AUTH_HEADERS', () => {
     expect(cfg.upstreamAuthHeaders).toEqual([])
   })
 
-  it('parses a single "Name: value" entry', () => {
-    const cfg = loadConfig({ ...baseEnv, UPSTREAM_AUTH_HEADERS: 'CF-Access-Client-Id: abc123' })
-    expect(cfg.upstreamAuthHeaders).toEqual([{ name: 'CF-Access-Client-Id', value: 'abc123' }])
-  })
-
-  it('parses two comma-separated entries (CF Access service token format)', () => {
+  it('parses the JSON array format (CF Access service token)', () => {
     const cfg = loadConfig({
       ...baseEnv,
-      UPSTREAM_AUTH_HEADERS:
-        'CF-Access-Client-Id: abc123, CF-Access-Client-Secret: super-secret',
+      UPSTREAM_AUTH_HEADERS: JSON.stringify([
+        { name: 'CF-Access-Client-Id', value: 'abc123' },
+        { name: 'CF-Access-Client-Secret', value: 'super,secret:with,commas' },
+      ]),
     })
     expect(cfg.upstreamAuthHeaders).toEqual([
       { name: 'CF-Access-Client-Id', value: 'abc123' },
-      { name: 'CF-Access-Client-Secret', value: 'super-secret' },
+      { name: 'CF-Access-Client-Secret', value: 'super,secret:with,commas' },
     ])
   })
 
-  it('trims extra whitespace around entries', () => {
-    const cfg = loadConfig({
-      ...baseEnv,
-      UPSTREAM_AUTH_HEADERS: '  X-Custom-Header:  trimmed  ,  X-Other: val  ',
-    })
-    expect(cfg.upstreamAuthHeaders).toEqual([
-      { name: 'X-Custom-Header', value: 'trimmed' },
-      { name: 'X-Other', value: 'val' },
-    ])
+  it('fails closed on the retired "Name: value" format', () => {
+    expect(() => loadConfig({ ...baseEnv, UPSTREAM_AUTH_HEADERS: 'CF-Access-Client-Id: abc123' })).toThrow(
+      /JSON array/,
+    )
   })
 
-  it('preserves colons inside the header value', () => {
-    const cfg = loadConfig({
-      ...baseEnv,
-      UPSTREAM_AUTH_HEADERS: 'Authorization: Bearer tok:en:with:colons',
-    })
-    expect(cfg.upstreamAuthHeaders).toEqual([
-      { name: 'Authorization', value: 'Bearer tok:en:with:colons' },
-    ])
+  it('rejects a non-array, a bad header name and a header-injection value', () => {
+    expect(() => loadConfig({ ...baseEnv, UPSTREAM_AUTH_HEADERS: '{"name":"a","value":"b"}' })).toThrow(/JSON array/)
+    expect(() => loadConfig({ ...baseEnv, UPSTREAM_AUTH_HEADERS: '[{"name":"Bad Name","value":"b"}]' })).toThrow(
+      /UPSTREAM_AUTH_HEADERS\[0\]/,
+    )
+    expect(() =>
+      loadConfig({ ...baseEnv, UPSTREAM_AUTH_HEADERS: JSON.stringify([{ name: 'X', value: 'a\r\nInjected: 1' }]) }),
+    ).toThrow(/UPSTREAM_AUTH_HEADERS\[0\]/)
   })
 })
 
@@ -63,7 +55,7 @@ describe('loadConfig — ALLOWED_ORIGINS', () => {
   it('defaults to the two Meddleware app origins when env var is absent', () => {
     const cfg = loadConfig(baseEnv)
     expect(cfg.allowedOrigins).toContain('https://sui-walrus.meddleware.co.uk')
-    expect(cfg.allowedOrigins).toContain('https://sui.meddleware.co.uk')
+    expect(cfg.allowedOrigins).toContain('https://dash.meddleware.co.uk')
   })
 
   it('defaults to the two Meddleware app origins when env var is empty string', () => {
@@ -105,5 +97,12 @@ describe('loadConfig — NFT_TYPE and GATE_ID validation', () => {
   it('requires a GATE_ID object id', () => {
     expect(() => loadConfig({ ...baseEnv, GATE_ID: '' })).toThrow(/GATE_ID/)
     expect(() => loadConfig({ ...baseEnv, GATE_ID: 'gate' })).toThrow(/GATE_ID/)
+  })
+})
+
+describe('loadConfig — CHALLENGE_RATE_LIMIT_PER_MIN', () => {
+  it('defaults to 30 per IP per minute (parity with the Rust gateway)', () => {
+    expect(loadConfig(baseEnv).challengeRateLimitPerMin).toBe(30)
+    expect(loadConfig({ ...baseEnv, CHALLENGE_RATE_LIMIT_PER_MIN: '0' }).challengeRateLimitPerMin).toBe(0)
   })
 })

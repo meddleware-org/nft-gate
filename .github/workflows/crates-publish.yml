@@ -1,7 +1,8 @@
 name: Publish (crates.io)
 
-# Publishes the gateway-rust crate to crates.io on a v* tag, gated on a
-# self-contained verify job (cargo test) against the exact tagged commit.
+# Publishes the gateway-rust crate to crates.io on a v* tag, gated on the full Rust CI against the
+# exact tagged commit. Uses crates.io trusted publishing (OIDC): no long-lived token. The crates.io
+# trusted publisher for nft-gate-gateway must name this repository and this workflow file.
 
 on:
   push:
@@ -13,37 +14,27 @@ permissions:
 
 jobs:
   verify:
-    name: Verify (gateway-rust tests)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: gateway-rust
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          workspaces: "gateway-rust -> target"
-      - name: Test
-        run: cargo test
+    uses: ./.github/workflows/rust-ci.yml
 
-  # ── Rust gateway: crates.io (cargo install distribution) ───────────────────
   publish-crates:
     name: crates.io (gateway-rust)
     runs-on: ubuntu-latest
     needs: verify
+    permissions:
+      contents: read
+      id-token: write # OIDC exchange for a short-lived crates.io token
     defaults:
       run:
         working-directory: gateway-rust
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
-          workspaces: "gateway-rust -> target"
+          toolchain: stable
 
+      # No tag == version check: this repository publishes the npm package and the crate from
+      # the same v* tag at different versions (idempotent: an already-published version is skipped).
       - name: Check if already published
         id: check
         run: |
@@ -58,8 +49,13 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Obtain a crates.io token (trusted publishing)
+        if: steps.check.outputs.skip == 'false'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+
       - name: Publish to crates.io
         if: steps.check.outputs.skip == 'false'
-        run: cargo publish --allow-dirty
+        run: cargo publish --locked
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

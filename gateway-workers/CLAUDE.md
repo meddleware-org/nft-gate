@@ -17,14 +17,14 @@ the same fullnode URL (`…:443`); only the transport changed.
 Single-use verification is **digest-first**: the access proof carries the `access_gate::consume`
 transaction digest, so `consumeEventMatches` fetches that exact transaction (`core.getTransaction`,
 `include: { events: true }`) and confirms it succeeded and emitted a matching `AccessConsumedEvent`
-(sender + nonce + gate). This is precise and needs no event-by-sender scan. Ownership (non
+(sender + gate; the consume is deliberately **not** bound to the challenge nonce — see
+"Redemption" below). This is precise and needs no event-by-sender scan. Ownership (non
 single-use) uses `fetchAccessNfts` from `@meddleware/nft-gate-client` over the same gRPC client.
 
 The gRPC event shape differs from JSON-RPC (`eventType`/`json` vs `type`/`parsedJson`); the pure
 helpers in `chain.ts` read both so they tolerate the documented `json`-shape variation. gRPC
 `getTransaction` is retried briefly to absorb fullnode indexing lag after the client's finality
-wait. **NOTE:** `gateway-rust/` still uses JSON-RPC and must be migrated to gRPC before it can be
-deployed against a public fullnode (see the nft-gate CLAUDE.md deferred section).
+wait. `gateway-rust/` reaches the same data over a hand-rolled gRPC-web client (`sui_rpc.rs`).
 
 ## Cloudflare Workers constraints
 
@@ -107,9 +107,8 @@ Security: decoupling from the nonce is safe because the event `sender` must equa
 signature-verified proof address (an attacker can't present someone else's consume; a soulbound NFT
 can't be transferred), and each digest is redeemable exactly once. The lease self-expires
 (`REDEMPTION_LEASE_TTL_SECS`, default 120s) so a crashed request can't strand a use — the rare cost
-is at most one extra upload if a worker dies between upstream success and commit. **Parity note:**
-`gateway-rust` does not yet implement redemption (or gRPC); see the nft-gate CLAUDE.md deferred
-section.
+is at most one extra upload if a worker dies between upstream success and commit. `gateway-rust`
+implements the same lease/commit/release redemption (`NonceStore`, orchestrated in `main.rs`).
 
 ## Conformance test workflow
 

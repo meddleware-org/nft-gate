@@ -10,11 +10,13 @@
 import type { Config, Env } from './config.js'
 import { loadConfig, isPublicPath } from './config.js'
 import type { NonceBackend } from './state/types.js'
+import { NONCE_SHARDS } from './state/types.js'
 import { makeBackend } from './state/select.js'
 import { SuiGrpc } from './chain.js'
 import { verifyAccessRequest, deniedReason } from './verify.js'
 import { forward } from './proxy.js'
 import { runQuotaGuard } from './quota.js'
+import { redeemAndForward } from './redemption.js'
 import { withCors, corsPreflightResponse, resolveAllowedOrigin } from './cors.js'
 
 export { NonceRateState } from './state/durable_object.js'
@@ -55,10 +57,37 @@ async function getState(env: Env): Promise<GatewayState> {
   }
   cached = {
     cfg,
-    backend: makeBackend(effective, env),
+    backend: guardBackend(makeBackend(effective, env)),
     chain: new SuiGrpc(cfg.suiRpcUrl, cfg.ownershipCacheTtlMs, cfg.suiRpcAuthHeader),
   }
   return cached
+}
+
+/** A nonce/rate/redemption store call failed (Durable Object or KV unavailable). */
+class StoreError extends Error {}
+
+/**
+ * Wrap every backend call so a storage failure surfaces as a {@link StoreError} — answered with a
+ * JSON 503 (fail closed) rather than an unhandled exception without CORS headers.
+ */
+function guardBackend(backend: NonceBackend): NonceBackend {
+  const wrap =
+    <A extends unknown[], R>(fn: (...args: A) => Promise<R>) =>
+    async (...args: A): Promise<R> => {
+      try {
+        return await fn(...args)
+      } catch (e) {
+        throw new StoreError((e as Error).message)
+      }
+    }
+  return {
+    issue: wrap(backend.issue.bind(backend)),
+    takeIfValid: wrap(backend.takeIfValid.bind(backend)),
+    rateCheck: wrap(backend.rateCheck.bind(backend)),
+    tryLeaseRedemption: wrap(backend.tryLeaseRedemption.bind(backend)),
+    commitRedemption: wrap(backend.commitRedemption.bind(backend)),
+    releaseRedemption: wrap(backend.releaseRedemption.bind(backend)),
+  }
 }
 
 /**
@@ -109,8 +138,13 @@ function extractProofToken(request: Request): string | undefined {
 function regionOf(cfg: Config, request: Request): string {
   if (cfg.nonceShard === 'global') return 'g'
   const cf = (request as { cf?: { continent?: string } }).cf
-  const continent = cf?.continent
-  return continent ? continent.toLowerCase() : 'g'
+  const continent = cf?.continent?.toLowerCase()
+  return continent && NONCE_SHARDS.has(continent) ? continent : 'g'
+}
+
+/** The client IP Cloudflare observed (the only trustworthy source at the edge). */
+function clientIp(request: Request): string {
+  return request.headers.get('CF-Connecting-IP') ?? 'unknown'
 }
 
 /**
@@ -129,20 +163,23 @@ async function forwardPublic(
   region: string,
   ctx: ExecutionContext,
 ): Promise<Response> {
-  const ip = request.headers.get('CF-Connecting-IP') ?? 'unknown'
-  if (!(await backend.rateCheck(`ip:${ip}`, cfg.publicRateLimitPerMin, region))) {
+  if (!(await backend.rateCheck(`ip:${clientIp(request)}`, cfg.publicRateLimitPerMin, region))) {
     return deny(429, 'rate limit exceeded')
   }
 
   if (request.method !== 'GET' || cfg.publicCacheTtlSecs <= 0) return forward(cfg, request)
 
-  // Cache key is the URL alone (public GET, no auth/cookies to vary on).
+  // Public GET paths take no parameters: drop the query string from both the cache key and the
+  // forwarded request, so `?x=<random>` can neither bust the cache nor reach the origin with a
+  // variant the cache would then serve to everyone.
+  const bare = new URL(request.url)
+  bare.search = ''
   const cache = (caches as unknown as { default: Cache }).default
-  const cacheKey = new Request(new URL(request.url).toString(), { method: 'GET' })
+  const cacheKey = new Request(bare.toString(), { method: 'GET' })
   const hit = await cache.match(cacheKey)
   if (hit) return hit
 
-  const resp = await forward(cfg, request)
+  const resp = await forward(cfg, new Request(bare.toString(), request))
   if (resp.ok) {
     const cached = new Response(resp.body, resp)
     cached.headers.set('Cache-Control', `public, max-age=${cfg.publicCacheTtlSecs}`)
@@ -175,13 +212,21 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   try {
     state = await getState(env)
   } catch (e) {
-    // Missing/invalid required config — fail closed (analogous to Rust's startup abort).
-    return deny(500, `gateway misconfigured: ${(e as Error).message}`)
+    // Missing/invalid required config — fail closed (analogous to Rust's startup abort). The
+    // detail goes to the Worker log only; clients learn nothing about the deployment.
+    console.error('gateway misconfigured:', (e as Error).message)
+    return deny(500, 'gateway misconfigured')
   }
   const { cfg, backend, chain } = state
 
   if (request.method === 'GET' && path === '/v1/challenge') {
-    const { nonce, expiresAt } = await backend.issue(regionOf(cfg, request), cfg.challengeTtlSecs)
+    const region = regionOf(cfg, request)
+    // Per-IP budget (parity with the Rust gateway): issuing a nonce writes state, so an
+    // unauthenticated flood must be bounded before it reaches the store.
+    if (!(await backend.rateCheck(`chal:${clientIp(request)}`, cfg.challengeRateLimitPerMin, region))) {
+      return deny(429, 'rate limit exceeded')
+    }
+    const { nonce, expiresAt } = await backend.issue(region, cfg.challengeTtlSecs)
     return json(200, { nonce, expiresAt })
   }
 
@@ -207,29 +252,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   // Single-use: the permanent on-chain `consumeDigest` is the one-time redemption token. Lease it,
   // proxy, then COMMIT on a successful upload or RELEASE on failure — so an interrupted upload
   // leaves the consume redeemable (the use is never lost) while a duplicate can't double-spend it.
-  const redemptionKey = result.redemptionKey
-  if (redemptionKey !== undefined) {
-    const lease = await backend.tryLeaseRedemption(redemptionKey, cfg.redemptionLeaseTtlSecs)
-    if (lease === 'redeemed') {
-      return deny(409, 'this consume has already been redeemed for an upload', 'redeemed')
-    }
-    if (lease === 'leased') {
-      return deny(409, 'an upload for this consume is already in progress', 'leased')
-    }
-    let resp: Response
-    try {
-      resp = await forward(cfg, request)
-    } catch (e) {
-      // Network/exception before a definitive upstream result — release so the user can retry.
-      await backend.releaseRedemption(redemptionKey)
-      throw e
-    }
-    if (resp.ok) {
-      await backend.commitRedemption(redemptionKey, cfg.redemptionRetentionSecs)
-    } else {
-      await backend.releaseRedemption(redemptionKey)
-    }
-    return resp
+  if (result.redemptionKey !== undefined) {
+    return redeemAndForward(cfg, backend, result.redemptionKey, () => forward(cfg, request))
   }
 
   return forward(cfg, request)
@@ -242,7 +266,19 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const origin = request.headers.get('origin')
-    const res = await handle(request, env, ctx)
+    let res: Response
+    try {
+      res = await handle(request, env, ctx)
+    } catch (e) {
+      // Fail closed with a JSON body the browser can read (CORS is still applied below).
+      if (e instanceof StoreError) {
+        console.error('state backend error:', e.message)
+        res = deny(503, 'gateway state unavailable')
+      } else {
+        console.error('unhandled gateway error:', (e as Error).message)
+        res = deny(502, 'bad gateway')
+      }
+    }
     // State is cached after handle() completes; a second call is free.
     const state = await getState(env).catch(() => null)
     const allowedOrigin = resolveAllowedOrigin(origin, state?.cfg.allowedOrigins ?? [])

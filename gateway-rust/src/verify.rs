@@ -60,9 +60,29 @@ fn derive_address(flag: u8, pk: &[u8]) -> String {
 }
 
 /// Normalise a Sui address to lowercase, 0x-prefixed, zero-padded to 64 hex digits.
-fn normalize_address(a: &str) -> String {
+pub fn normalize_address(a: &str) -> String {
     let s = a.trim().trim_start_matches("0x").to_lowercase();
     format!("0x{s:0>64}")
+}
+
+/// Normalise the package address of a `<pkg>::<module>::<name>` type string so the short and
+/// long (gRPC) address forms compare equal.
+pub fn normalize_move_type(t: &str) -> String {
+    match t.split_once("::") {
+        Some((pkg, rest)) if !pkg.is_empty() => format!("{}::{rest}", normalize_address(pkg)),
+        _ => t.to_string(),
+    }
+}
+
+/// The exact `AccessConsumedEvent` type of the access_gate package that `nft_type` names. Matching
+/// the full type (not a `::access_gate::AccessConsumedEvent` suffix) stops a look-alike package
+/// from emitting a forged consume event. Event and NFT types both carry the package's original id.
+pub fn consumed_event_type(nft_type: &str) -> String {
+    let pkg = nft_type.split("::").next().unwrap_or_default();
+    format!(
+        "{}::access_gate::AccessConsumedEvent",
+        normalize_address(pkg)
+    )
 }
 
 /// Verify a Sui personal-message signature recovers `address` over `message`, dispatching on
@@ -97,26 +117,28 @@ pub fn verify_personal_message_signature(
     }
 }
 
-/// ed25519 (flag 0x00): body = `sig(64) || pubkey(32)`.
+/// ed25519 (flag 0x00): body = `sig(64) || pubkey(32)`. Verified under **ZIP-215** — the rule
+/// Sui validators apply (and the Workers gateway's `zip215: true`) — so the gateway accepts
+/// exactly the signatures the chain accepts; pinned by the conformance `zip215` vector.
 fn verify_ed25519(address: &str, message: &[u8], body: &[u8]) -> bool {
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use ed25519_consensus::{Signature, VerificationKey};
     if body.len() != 96 {
         return false;
     }
-    let sig = match Signature::from_slice(&body[0..64]) {
-        Ok(s) => s,
+    let sig_bytes: [u8; 64] = match body[0..64].try_into() {
+        Ok(b) => b,
         Err(_) => return false,
     };
     let pk_bytes: [u8; 32] = match body[64..96].try_into() {
         Ok(b) => b,
         Err(_) => return false,
     };
-    let vk = match VerifyingKey::from_bytes(&pk_bytes) {
+    let vk = match VerificationKey::try_from(pk_bytes) {
         Ok(k) => k,
         Err(_) => return false,
     };
     let digest = signing_digest(message);
-    if vk.verify(&digest, &sig).is_err() {
+    if vk.verify(&Signature::from(sig_bytes), &digest).is_err() {
         return false;
     }
     normalize_address(address) == derive_address(FLAG_ED25519, &pk_bytes)
@@ -134,6 +156,11 @@ fn verify_secp256k1(address: &str, message: &[u8], body: &[u8]) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
+    // Sui requires low-S; reject the high-S twin explicitly (k256 also does, but do not rely on
+    // a library default for a consensus rule).
+    if sig.normalize_s().is_some() {
+        return false;
+    }
     let pk_bytes = &body[64..97];
     let vk = match VerifyingKey::from_sec1_bytes(pk_bytes) {
         Ok(k) => k,
@@ -157,6 +184,11 @@ fn verify_secp256r1(address: &str, message: &[u8], body: &[u8]) -> bool {
         Ok(s) => s,
         Err(_) => return false,
     };
+    // Sui requires low-S for secp256r1 too; `p256` does NOT enforce it on verify, so without this
+    // check the gateway would accept the malleable high-S twin the chain and Workers reject.
+    if sig.normalize_s().is_some() {
+        return false;
+    }
     let pk_bytes = &body[64..97];
     let vk = match VerifyingKey::from_sec1_bytes(pk_bytes) {
         Ok(k) => k,
@@ -182,14 +214,16 @@ pub trait ChainQuery {
         gate_id: Option<&str>,
     ) -> anyhow::Result<bool>;
 
-    /// Does `consume_digest` name a successful `access_gate::consume` transaction that emitted an
-    /// `AccessConsumedEvent` for `address` (the sender) on `gate_id`? Digest-first and NOT bound to
-    /// the challenge nonce — single-use is enforced by the redemption store keying on the digest,
-    /// so an interrupted upload can resume with a fresh challenge while reusing the same consume.
+    /// Does `consume_digest` name a successful transaction that emitted an event of exactly
+    /// `consumed_event_type` (the configured package's `AccessConsumedEvent`) for `address` (the
+    /// sender) on `gate_id`? Digest-first and NOT bound to the challenge nonce — single-use is
+    /// enforced by the redemption store keying on the digest, so an interrupted upload can resume
+    /// with a fresh challenge while reusing the same consume.
     async fn consume_tx_valid(
         &self,
         consume_digest: &str,
         address: &str,
+        consumed_event_type: &str,
         gate_id: Option<&str>,
     ) -> anyhow::Result<bool>;
 
@@ -291,7 +325,12 @@ pub async fn verify_access_request<C: ChainQuery>(
             return Err(Denied::ConsumeMissing);
         };
         let ok = chain
-            .consume_tx_valid(digest, &address, Some(cfg.gate_id.as_str()))
+            .consume_tx_valid(
+                digest,
+                &address,
+                &consumed_event_type(&cfg.nft_type),
+                Some(cfg.gate_id.as_str()),
+            )
             .await
             .map_err(|_| Denied::ChainError)?;
         if !ok {
@@ -497,6 +536,34 @@ mod tests {
             let p = crate::proof::decode_access_proof(sig["proofToken"].as_str().unwrap()).unwrap();
             assert_eq!(p.address, address);
         }
+
+        // negative vectors: high-S ECDSA, non-canonical ed25519 s, wrong intent, truncation and
+        // the unsupported flags must all be rejected by both implementations.
+        for neg in v["negativeSignatures"].as_array().unwrap() {
+            let msg = personal_message_for_nonce(neg["nonce"].as_str().unwrap());
+            assert!(
+                !verify_personal_message_signature(
+                    neg["address"].as_str().unwrap(),
+                    &msg,
+                    neg["signature"].as_str().unwrap()
+                ),
+                "negative vector accepted: {}",
+                neg["case"].as_str().unwrap_or("?")
+            );
+        }
+
+        // ZIP-215: Sui validators verify ed25519 under ZIP-215, so the gateway must accept this
+        // small-order vector (a strict RFC 8032 verifier rejects it).
+        let z = &v["zip215"];
+        let msg = personal_message_for_nonce(z["nonce"].as_str().unwrap());
+        assert!(
+            verify_personal_message_signature(
+                z["address"].as_str().unwrap(),
+                &msg,
+                z["signature"].as_str().unwrap()
+            ),
+            "ZIP-215 vector rejected"
+        );
     }
 
     #[test]
@@ -541,8 +608,14 @@ mod tests {
             &self,
             _d: &str,
             _a: &str,
+            event_type: &str,
             _g: Option<&str>,
         ) -> anyhow::Result<bool> {
+            // The verifier must ask for the configured package's exact event type.
+            assert_eq!(
+                event_type,
+                "0x0000000000000000000000000000000000000000000000000000000000000001::access_gate::AccessConsumedEvent"
+            );
             Ok(self.consumed)
         }
         async fn gate_access_blocked(&self, _g: &str) -> anyhow::Result<bool> {
@@ -552,23 +625,8 @@ mod tests {
 
     fn cfg(single_use: bool) -> GatewayConfig {
         GatewayConfig {
-            bind_addr: "0.0.0.0:8080".parse().unwrap(),
-            upstream_url: "http://upstream".into(),
-            sui_rpc_url: "http://rpc".into(),
-            nft_type: "0x1::access_gate::AccessNFT".into(),
-            gate_id: "0x2".into(),
-            challenge_ttl_secs: 300,
             single_use,
-            public_paths: vec!["/v1/tip-config".into()],
-            rate_limit_per_min: 30,
-            challenge_rate_limit_per_min: 30,
-            max_body_bytes: 262144,
-            redis_url: None,
-            nonce_max_entries: 10_000,
-            nonce_prune_interval_secs: 60,
-            ownership_cache_ttl_ms: 0,
-            redemption_lease_ttl_secs: 120,
-            redemption_retention_secs: 2_592_000,
+            ..crate::tests_support::test_cfg()
         }
     }
 

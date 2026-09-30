@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { KvBackend } from '../src/state/kv.js'
+import { redeemAndForward } from '../src/redemption.js'
+import type { Config } from '../src/config.js'
 
 /**
  * Exercise the REAL `KvBackend` redemption state machine against a Map-backed fake `KVNamespace`
@@ -58,3 +60,52 @@ describe('KvBackend redemption state machine', () => {
     expect(await store.tryLeaseRedemption(k, 120)).toBe('ok')
   })
 })
+
+describe('redeemAndForward (lease → proxy → commit / release)', () => {
+  const cfg = { redemptionLeaseTtlSecs: 120, redemptionRetentionSecs: 3600 } as Config
+  const ok = () => Promise.resolve(new Response('stored', { status: 200 }))
+
+  it('commits after a successful upload, so the same consume is then redeemed', async () => {
+    const store = new KvBackend(fakeKv())
+    expect((await redeemAndForward(cfg, store, '0xd1', ok)).status).toBe(200)
+    const again = await redeemAndForward(cfg, store, '0xd1', ok)
+    expect(again.status).toBe(409)
+    expect(await again.json()).toMatchObject({ code: 'redeemed' })
+  })
+
+  it('releases after an upstream failure, so the consume stays usable', async () => {
+    const store = new KvBackend(fakeKv())
+    const fail = await redeemAndForward(cfg, store, '0xd2', () => Promise.resolve(new Response('no', { status: 503 })))
+    expect(fail.status).toBe(503)
+    expect((await redeemAndForward(cfg, store, '0xd2', ok)).status).toBe(200)
+  })
+
+  it('reports a failed commit as 502 (never success) and releases the lease', async () => {
+    const store = new KvBackend(fakeKv())
+    const released: string[] = []
+    const failingCommit = Object.assign(Object.create(store), {
+      commitRedemption: async () => {
+        throw new Error('storage down')
+      },
+      releaseRedemption: async (k: string) => {
+        released.push(k)
+        await store.releaseRedemption(k)
+      },
+    }) as KvBackend
+    const res = await redeemAndForward(cfg, failingCommit, '0xd3', ok)
+    expect(res.status).toBe(502)
+    expect(await res.json()).toEqual({ error: 'redemption commit failed' })
+    expect(released).toEqual(['0xd3'])
+    // The consume was not spent: it can be redeemed once storage recovers.
+    expect((await redeemAndForward(cfg, store, '0xd3', ok)).status).toBe(200)
+  })
+
+  it('releases and rethrows when the upstream request itself throws', async () => {
+    const store = new KvBackend(fakeKv())
+    await expect(redeemAndForward(cfg, store, '0xd4', () => Promise.reject(new Error('network')))).rejects.toThrow(
+      'network',
+    )
+    expect(await store.tryLeaseRedemption('0xd4', 120)).toBe('ok')
+  })
+})
+

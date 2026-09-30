@@ -2,14 +2,15 @@
 //! `max_body_bytes` (a griefing guard): a declared `Content-Length` over the cap is rejected
 //! before any byte is read; otherwise the body is read up to the cap.
 //!
-//! Memory: the request body is buffered in full (`to_bytes`), and so is the upstream response.
-//! Worst case per in-flight gated request is about `max_body_bytes` (transiently up to ~2× while
-//! multi-chunk bodies are collected into one buffer) plus the response size; there is no
-//! concurrency cap, so peak RSS scales with concurrent uploads. Streaming both directions (as
-//! `gateway-workers` does) is the follow-up — see README "Request body limit".
+//! Memory: the request body is buffered in full (`to_bytes`), and so is the upstream response
+//! (capped at `MAX_RESPONSE_BYTES`). Worst case per in-flight request is about `2 × max_body_bytes`
+//! plus the response; `MAX_CONCURRENT_REQUESTS` bounds the number of in-flight requests, so peak
+//! body memory ≈ `MAX_CONCURRENT_REQUESTS × (2 × MAX_BODY_BYTES + MAX_RESPONSE_BYTES)`. Streaming
+//! both directions (as `gateway-workers` does) remains the follow-up — see README.
 //!
 //! Headers stripped from the **forwarded request**: `Host`, `Authorization`,
-//! `X-Access-Proof`, and `Content-Length` (recomputed by the HTTP client).
+//! `X-Access-Proof`, and `Content-Length` (recomputed by the HTTP client). `UPSTREAM_AUTH_HEADERS`
+//! are then added (replacing any client-supplied header of the same name).
 //!
 //! Headers stripped from the **upstream response**: `Content-Length`, `Transfer-Encoding`,
 //! and `Connection` (hop-by-hop; recomputed / not safe to forward).
@@ -69,7 +70,19 @@ pub async fn forward(app: &AppState, req: Request) -> Response {
     headers.remove(header::CONTENT_LENGTH);
     headers.remove("x-access-proof");
 
-    match app.http.forward(parts.method, &url, headers, bytes).await {
+    match app
+        .http
+        .forward(
+            parts.method,
+            &url,
+            headers,
+            bytes,
+            &app.cfg.upstream_auth_headers,
+            std::time::Duration::from_secs(app.cfg.upstream_timeout_secs),
+            app.cfg.max_response_bytes,
+        )
+        .await
+    {
         Ok(resp) => {
             let mut builder = Response::builder().status(resp.status);
             for (name, value) in &resp.headers {

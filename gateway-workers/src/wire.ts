@@ -4,9 +4,10 @@
  * proof token shape across the toolkit (the "one contract that spans all three" rule in
  * nft-gate/CLAUDE.md).
  *
- * Imported by relative path (the in-repo convention) directly from the client's `proof.ts` /
- * `types.ts`, which import only `./types.js` — so this pulls in NO `@mysten/sui` and keeps the
- * Worker bundle lean.
+ * Imported from the published package entry. That entry also exports the PTB and ownership
+ * helpers (which use `@mysten/sui`); the Worker already depends on `@mysten/sui` for its gRPC
+ * client (`chain.ts`), so this adds no new dependency, and Wrangler's bundler tree-shakes the
+ * unused exports.
  *
  * Self-contained-mirror alternative (documented for future review): if the Worker must ship
  * fully decoupled from the client package, replace these two lines with a local copy of

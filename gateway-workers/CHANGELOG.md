@@ -2,6 +2,38 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [Unreleased]
+
+### Security
+
+- Single-use: the consume event must be exactly `<NFT_TYPE package>::access_gate::AccessConsumedEvent`
+  (previously any `…::access_gate::AccessConsumedEvent` suffix, which a look-alike package could
+  emit for free). Sender and gate ids are compared in normalised form.
+
+### Changed
+
+- **Breaking (operator):** `UPSTREAM_AUTH_HEADERS` is a JSON array of `{name, value}`; the old
+  comma-separated `Name: value` string fails closed at startup. See the walrus runbook for the
+  migration order.
+- `ALLOWED_ORIGINS` code default matches `wrangler.toml` (`sui-walrus.` and `dash.`).
+- A misconfigured gateway answers `500 gateway misconfigured` without echoing the config error.
+- Public GET paths drop the query string from the edge-cache key and the forwarded request.
+- ed25519 verification is explicitly ZIP-215 (Sui's rule).
+
+### Added
+
+- `GET /v1/challenge` per-IP rate limit (`CHALLENGE_RATE_LIMIT_PER_MIN`, default 30; Rust parity).
+- Nonce shard tags are validated against the continent allowlist; forged tags are `NonceInvalid`.
+- State-backend failures return a JSON `503` with CORS; a failed redemption commit releases the
+  lease and returns `502` (Rust parity).
+- `Vary: Origin` on every response.
+- Conformance: `negativeSignatures` (high-S k1/r1, non-canonical ed25519 s, wrong intent,
+  truncated, flags 0x03/0x05/0x06) and a `zip215` acceptance vector.
+
+### Fixed
+
+- The quota guard no longer throws when the KV degrade-flag write fails.
+
 ## [0.0.3] - 2026-08-29
 
 ### Added

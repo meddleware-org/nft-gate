@@ -7,21 +7,12 @@ on:
 env:
   IMAGE: nft-gate-gateway
 
+permissions:
+  contents: read
+
 jobs:
   verify:
-    name: Verify (gateway-rust tests)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: gateway-rust
-    steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2.9.2
-        with:
-          workspaces: "gateway-rust -> target"
-      - name: Test
-        run: cargo test
+    uses: ./.github/workflows/rust-ci.yml
 
   # ── Rust gateway: Docker image — split into per-arch native builds + merge ──
   # Using native ubuntu-24.04-arm runners instead of QEMU emulation eliminates
@@ -36,25 +27,25 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to quay.io
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push (linux/amd64)
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: gateway-rust
           platforms: linux/amd64
@@ -72,25 +63,25 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to quay.io
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push (linux/arm64)
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: gateway-rust
           platforms: linux/arm64
@@ -110,17 +101,17 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to quay.io
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -128,7 +119,7 @@ jobs:
 
       - name: Compute final tags and labels
         id: meta
-        uses: docker/metadata-action@v6.2.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: |
             quay.io/${{ vars.QUAY_NAMESPACE }}/${{ env.IMAGE }}
@@ -145,30 +136,31 @@ jobs:
           QUAY_NS: ${{ vars.QUAY_NAMESPACE }}
           DOCKERHUB_NS: ${{ vars.DOCKERHUB_NAMESPACE }}
           SHA: ${{ github.sha }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           QUAY_SRC="quay.io/${QUAY_NS}/${IMAGE}:${SHA}"
           HUB_SRC="docker.io/${DOCKERHUB_NS}/${IMAGE}:${SHA}"
 
           # Build --tag flags from metadata output
-          QUAY_FLAGS=""
-          HUB_FLAGS=""
+          QUAY_FLAGS=()
+          HUB_FLAGS=()
           while IFS= read -r tag; do
             if [[ "$tag" == quay.io/* ]]; then
-              QUAY_FLAGS="$QUAY_FLAGS --tag $tag"
+              QUAY_FLAGS+=(--tag "$tag")
             elif [[ "$tag" == docker.io/* ]]; then
-              HUB_FLAGS="$HUB_FLAGS --tag $tag"
+              HUB_FLAGS+=(--tag "$tag")
             fi
-          done <<< "${{ steps.meta.outputs.tags }}"
+          done <<< "${TAGS}"
 
-          docker buildx imagetools create $QUAY_FLAGS "${QUAY_SRC}-amd64" "${QUAY_SRC}-arm64"
-          docker buildx imagetools create $HUB_FLAGS   "${HUB_SRC}-amd64"  "${HUB_SRC}-arm64"
+          docker buildx imagetools create "${QUAY_FLAGS[@]}" "${QUAY_SRC}-amd64" "${QUAY_SRC}-arm64"
+          docker buildx imagetools create "${HUB_FLAGS[@]}"   "${HUB_SRC}-amd64"  "${HUB_SRC}-arm64"
 
           # Resolve the merged manifest digest from the primary semver tag
-          PRIMARY=$(echo "${{ steps.meta.outputs.tags }}" | grep 'quay.io' | grep -v 'latest' | head -1)
+          PRIMARY=$(echo "${TAGS}" | grep 'quay.io' | grep -v 'latest' | head -1)
           DIGEST=$(docker buildx imagetools inspect "${PRIMARY}" --format '{{.Manifest.Digest}}')
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
-      - uses: sigstore/cosign-installer@v4.1.2
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign images (keyless)
         env:
@@ -179,17 +171,33 @@ jobs:
           cosign sign --yes "quay.io/${QUAY_NS}/${IMAGE}@${DIGEST}"
           cosign sign --yes "docker.io/${DOCKERHUB_NS}/${IMAGE}@${DIGEST}"
 
+      # SBOM of the published image, attached as a signed cosign attestation (SPDX JSON).
+      - name: Generate SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          image: quay.io/${{ vars.QUAY_NAMESPACE }}/${{ env.IMAGE }}@${{ steps.merge.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+
+      - name: Attest SBOM (keyless)
+        env:
+          DIGEST: ${{ steps.merge.outputs.digest }}
+          QUAY_NS: ${{ vars.QUAY_NAMESPACE }}
+          DOCKERHUB_NS: ${{ vars.DOCKERHUB_NAMESPACE }}
+        run: |
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "quay.io/${QUAY_NS}/${IMAGE}@${DIGEST}"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "docker.io/${DOCKERHUB_NS}/${IMAGE}@${DIGEST}"
+
       - name: Attest build provenance (quay.io)
-        uses: actions/attest-build-provenance@v4.2.2
-        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: quay.io/${{ vars.QUAY_NAMESPACE }}/${{ env.IMAGE }}
           subject-digest: ${{ steps.merge.outputs.digest }}
           push-to-registry: true
 
       - name: Attest build provenance (Docker Hub)
-        uses: actions/attest-build-provenance@v4.2.2
-        continue-on-error: true
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: docker.io/${{ vars.DOCKERHUB_NAMESPACE }}/${{ env.IMAGE }}
           subject-digest: ${{ steps.merge.outputs.digest }}
@@ -208,18 +216,18 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to self-hosted registry
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ vars.PRIVATE_REGISTRY }}
           username: ${{ secrets.PRIVATE_REGISTRY_USERNAME }}
           password: ${{ secrets.PRIVATE_REGISTRY_TOKEN }}
 
       - name: Build and push (linux/amd64)
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: gateway-rust
           platforms: linux/amd64
@@ -236,18 +244,18 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7.0.1
-      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to self-hosted registry
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ vars.PRIVATE_REGISTRY }}
           username: ${{ secrets.PRIVATE_REGISTRY_USERNAME }}
           password: ${{ secrets.PRIVATE_REGISTRY_TOKEN }}
 
       - name: Build and push (linux/arm64)
-        uses: docker/build-push-action@v7.3.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: gateway-rust
           platforms: linux/arm64
@@ -264,10 +272,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: docker/setup-buildx-action@v4.3.0
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Log in to self-hosted registry
-        uses: docker/login-action@v4.6.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ${{ vars.PRIVATE_REGISTRY }}
           username: ${{ secrets.PRIVATE_REGISTRY_USERNAME }}
@@ -275,7 +283,7 @@ jobs:
 
       - name: Compute tags
         id: meta
-        uses: docker/metadata-action@v6.2.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ vars.PRIVATE_REGISTRY }}/${{ vars.PRIVATE_NAMESPACE }}/${{ env.IMAGE }}
           tags: |
@@ -289,10 +297,11 @@ jobs:
           SHA: ${{ github.sha }}
           REG: ${{ vars.PRIVATE_REGISTRY }}
           NS: ${{ vars.PRIVATE_NAMESPACE }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           SRC="${REG}/${NS}/${IMAGE}:${SHA}"
-          FLAGS=""
+          FLAGS=()
           while IFS= read -r tag; do
-            FLAGS="$FLAGS --tag $tag"
-          done <<< "${{ steps.meta.outputs.tags }}"
-          docker buildx imagetools create $FLAGS "${SRC}-amd64" "${SRC}-arm64"
+            FLAGS+=(--tag "$tag")
+          done <<< "${TAGS}"
+          docker buildx imagetools create "${FLAGS[@]}" "${SRC}-amd64" "${SRC}-arm64"

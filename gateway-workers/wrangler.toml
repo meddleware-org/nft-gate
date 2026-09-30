@@ -18,7 +18,7 @@
 #
 #   UPSTREAM_AUTH_HEADERS (required for CF-Access-locked origin):
 #     wrangler secret put UPSTREAM_AUTH_HEADERS
-#     Value: "CF-Access-Client-Id: <id>, CF-Access-Client-Secret: <secret>"
+#     Value (JSON): [{"name":"CF-Access-Client-Id","value":"<id>"},{"name":"CF-Access-Client-Secret","value":"<secret>"}]
 #     Obtain from: Cloudflare Zero Trust → Access → Service Tokens → create token
 #     The Access policy on your origin hostname must allow this token.
 #
@@ -52,6 +52,8 @@ GATE_ID = "0xcb8206cab55902247daba61bad3d6c92f072425fe4034a98d6a22400d25a5f50"
 SINGLE_USE = "true"
 PUBLIC_PATHS = "/v1/tip-config"
 RATE_LIMIT_PER_MIN = "30"
+# Per-client-IP budget for GET /v1/challenge (issuing a nonce writes Durable Object state).
+CHALLENGE_RATE_LIMIT_PER_MIN = "30"
 # Unauthenticated public paths (/v1/tip-config) are protected separately: a higher per-client-IP
 # request ceiling (cheap GETs) plus an edge cache so floods are absorbed before reaching the relay.
 PUBLIC_RATE_LIMIT_PER_MIN = "120"

@@ -8,8 +8,16 @@
 //! decoded; all others are skipped. Field numbers are pinned from the `MystenLabs/sui-apis` protos
 //! and validated against live responses.
 
-use crate::http_client::HttpClient;
+use crate::config::AuthHeader;
+use crate::http_client::{HttpClient, MAX_RPC_RESPONSE_BYTES};
 use bytes::Bytes;
+use hyper::http::HeaderMap;
+
+/// Largest decoded gRPC message the gateway accepts (the HTTP body is capped at the same size).
+pub const MAX_GRPC_MESSAGE_BYTES: usize = MAX_RPC_RESPONSE_BYTES;
+/// Deepest `google.protobuf.Value` nesting [`value_find_string`] descends into. Move structs in
+/// the responses the gateway reads are a few levels deep; the cap bounds hostile input.
+const MAX_VALUE_DEPTH: usize = 32;
 
 // ── protobuf wire codec (varint + length-delimited + skipped fixed) ──────────────────────────
 
@@ -179,19 +187,27 @@ const ENTRY_KEY: u32 = 1;
 const ENTRY_VALUE: u32 = 2;
 const LIST_VALUES: u32 = 1;
 
-/// Find the `string_value` of the first field named `key` anywhere within a `google.protobuf.Value`.
+/// Find the `string_value` of the first field named `key` anywhere within a `google.protobuf.Value`
+/// (at most [`MAX_VALUE_DEPTH`] levels deep; deeper input is not searched).
 pub fn value_find_string(value: &[u8], key: &str) -> Option<String> {
+    value_find_string_at(value, key, 0)
+}
+
+fn value_find_string_at(value: &[u8], key: &str, depth: usize) -> Option<String> {
+    if depth >= MAX_VALUE_DEPTH {
+        return None;
+    }
     for f in ProtoReader::new(value) {
         match f {
             Field::Len(VALUE_STRUCT, s) => {
-                if let Some(v) = struct_find_string(s, key) {
+                if let Some(v) = struct_find_string(s, key, depth + 1) {
                     return Some(v);
                 }
             }
             Field::Len(VALUE_LIST, l) => {
                 for lf in ProtoReader::new(l) {
                     if let Field::Len(LIST_VALUES, item) = lf {
-                        if let Some(v) = value_find_string(item, key) {
+                        if let Some(v) = value_find_string_at(item, key, depth + 1) {
                             return Some(v);
                         }
                     }
@@ -203,7 +219,7 @@ pub fn value_find_string(value: &[u8], key: &str) -> Option<String> {
     None
 }
 
-fn struct_find_string(s: &[u8], key: &str) -> Option<String> {
+fn struct_find_string(s: &[u8], key: &str, depth: usize) -> Option<String> {
     for f in ProtoReader::new(s) {
         if let Field::Len(STRUCT_FIELDS, entry) = f {
             let entry_key = field_str(entry, ENTRY_KEY);
@@ -215,7 +231,7 @@ fn struct_find_string(s: &[u8], key: &str) -> Option<String> {
                     }
                 }
                 // Recurse to reach a key nested deeper (e.g. an NFT's `data.gate_id`).
-                if let Some(found) = value_find_string(v, key) {
+                if let Some(found) = value_find_string_at(v, key, depth) {
                     return Some(found);
                 }
             }
@@ -255,12 +271,22 @@ pub fn frame(msg: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Unframe a gRPC-web response body: concatenate data frames (high bit of the flag clear) into the
-/// response message and parse the trailer frame (high bit set) for `grpc-status`. Errors on a
-/// non-zero status or malformed framing (fail closed).
-pub fn unframe(body: &[u8]) -> anyhow::Result<Vec<u8>> {
+/// Parse a `grpc-status` value.
+fn parse_status(v: &str) -> Option<i64> {
+    v.trim().parse::<i64>().ok()
+}
+
+/// Unframe a gRPC-web response: concatenate data frames (high bit of the flag clear) into the
+/// response message and read `grpc-status` from the trailer frame (high bit set) or, for a
+/// trailers-only response (how full nodes answer errors such as NOT_FOUND), from the HTTP headers.
+/// Fails closed on a non-zero status, a missing status, trailing garbage, malformed framing, or a
+/// message over [`MAX_GRPC_MESSAGE_BYTES`].
+pub fn unframe(headers: &HeaderMap, body: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut msg = Vec::new();
-    let mut grpc_status: Option<i64> = None;
+    let mut grpc_status: Option<i64> = headers
+        .get("grpc-status")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_status);
     let mut i = 0usize;
     while i + 5 <= body.len() {
         let flag = body[i];
@@ -275,18 +301,28 @@ pub fn unframe(body: &[u8]) -> anyhow::Result<Vec<u8>> {
         if flag & 0x80 != 0 {
             // Trailer frame: an HTTP-header block, e.g. "grpc-status:0\r\ngrpc-message:...".
             for line in String::from_utf8_lossy(frame).split("\r\n") {
-                if let Some(v) = line.trim().strip_prefix("grpc-status:") {
-                    grpc_status = v.trim().parse::<i64>().ok();
+                let line = line.trim();
+                if line.len() > 12 && line[..12].eq_ignore_ascii_case("grpc-status:") {
+                    grpc_status = parse_status(&line[12..]);
                 }
             }
         } else {
+            if flag != 0 {
+                anyhow::bail!("compressed gRPC-web frames are not supported");
+            }
+            if msg.len() + frame.len() > MAX_GRPC_MESSAGE_BYTES {
+                anyhow::bail!("gRPC message exceeds {MAX_GRPC_MESSAGE_BYTES} bytes");
+            }
             msg.extend_from_slice(frame);
         }
     }
+    if i != body.len() {
+        anyhow::bail!("gRPC-web body has a truncated frame header");
+    }
     match grpc_status {
-        // A missing in-body trailer with a non-empty message is treated as OK.
-        None | Some(0) => Ok(msg),
+        Some(0) => Ok(msg),
         Some(code) => anyhow::bail!("gRPC status {code}"),
+        None => anyhow::bail!("gRPC-web response carries no grpc-status"),
     }
 }
 
@@ -294,14 +330,17 @@ pub fn unframe(body: &[u8]) -> anyhow::Result<Vec<u8>> {
 pub struct GrpcWeb {
     http: HttpClient,
     base_url: String,
+    auth: Option<AuthHeader>,
 }
 
 impl GrpcWeb {
-    /// `base_url` is the full-node origin, e.g. `https://fullnode.testnet.sui.io:443`.
-    pub fn new(http: HttpClient, base_url: String) -> Self {
+    /// `base_url` is the full-node origin, e.g. `https://fullnode.testnet.sui.io:443`; `auth` is
+    /// the optional `SUI_RPC_AUTH_HEADER`.
+    pub fn new(http: HttpClient, base_url: String, auth: Option<AuthHeader>) -> Self {
         Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
+            auth,
         }
     }
 
@@ -309,11 +348,52 @@ impl GrpcWeb {
     /// (unframed) response message bytes.
     pub async fn call(&self, service_method: &str, request: Vec<u8>) -> anyhow::Result<Vec<u8>> {
         let url = format!("{}/{}", self.base_url, service_method);
-        let resp = self
+        let (headers, body) = self
             .http
-            .post_grpc_web(&url, Bytes::from(frame(&request)))
+            .post_grpc_web(&url, Bytes::from(frame(&request)), self.auth.as_ref())
             .await?;
-        unframe(&resp)
+        unframe(&headers, &body)
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        // Arbitrary bytes never panic the readers, and every yielded field stays in bounds.
+        #[test]
+        fn proto_reader_never_panics(buf in proptest::collection::vec(any::<u8>(), 0..512)) {
+            for f in ProtoReader::new(&buf) {
+                if let Field::Len(_, b) = f {
+                    prop_assert!(b.len() <= buf.len());
+                }
+            }
+        }
+
+        #[test]
+        fn value_lookup_never_panics(buf in proptest::collection::vec(any::<u8>(), 0..512)) {
+            let _ = value_find_string(&buf, "gate_id");
+            let _ = value_field(&buf, "paused").and_then(value_as_bool);
+        }
+
+        #[test]
+        fn unframe_never_panics_and_respects_the_cap(buf in proptest::collection::vec(any::<u8>(), 0..512)) {
+            if let Ok(msg) = unframe(&HeaderMap::new(), &buf) {
+                prop_assert!(msg.len() <= MAX_GRPC_MESSAGE_BYTES);
+                prop_assert!(msg.len() <= buf.len());
+            }
+        }
+
+        // Anything the writer produces reads back identically.
+        #[test]
+        fn writer_reader_round_trip_any(field in 1u32..536_870_911, data in proptest::collection::vec(any::<u8>(), 0..256)) {
+            let mut w = ProtoWriter::new();
+            w.bytes_field(field, &data);
+            let bytes = w.into_bytes();
+            prop_assert_eq!(field_bytes(&bytes, field), Some(&data[..]));
+        }
     }
 }
 
@@ -349,7 +429,48 @@ mod tests {
         body.push(0x80);
         body.extend_from_slice(&(trailer.len() as u32).to_be_bytes());
         body.extend_from_slice(trailer);
-        assert_eq!(unframe(&body).unwrap(), msg);
+        assert_eq!(unframe(&HeaderMap::new(), &body).unwrap(), msg);
+    }
+
+    #[test]
+    fn unframe_fails_closed_without_a_status() {
+        // A data frame with no trailer and no grpc-status header is not a complete response.
+        assert!(unframe(&HeaderMap::new(), &frame(b"msg")).is_err());
+    }
+
+    #[test]
+    fn unframe_reads_trailers_only_status_from_headers() {
+        let mut h = HeaderMap::new();
+        h.insert("grpc-status", "5".parse().unwrap()); // NOT_FOUND, empty body
+        assert!(unframe(&h, &[]).is_err());
+        h.insert("grpc-status", "0".parse().unwrap());
+        assert_eq!(unframe(&h, &[]).unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn unframe_rejects_truncated_and_compressed_frames() {
+        let mut ok_status = HeaderMap::new();
+        ok_status.insert("grpc-status", "0".parse().unwrap());
+        let mut body = frame(b"msg");
+        body.extend_from_slice(&[0x00, 0x00]); // stray partial header
+        assert!(unframe(&ok_status, &body).is_err());
+        let mut compressed = frame(b"msg");
+        compressed[0] = 0x01;
+        assert!(unframe(&ok_status, &compressed).is_err());
+    }
+
+    #[test]
+    fn value_find_string_stops_at_the_depth_limit() {
+        // Wrap a {gate_id} struct in 40 list levels: deeper than MAX_VALUE_DEPTH, so not found.
+        let mut v = struct_value(&[("gate_id", "0xGATE")]);
+        for _ in 0..40 {
+            let mut list = ProtoWriter::new();
+            list.bytes_field(LIST_VALUES, &v);
+            let mut value = ProtoWriter::new();
+            value.bytes_field(VALUE_LIST, &list.into_bytes());
+            v = value.into_bytes();
+        }
+        assert_eq!(value_find_string(&v, "gate_id"), None);
     }
 
     #[test]
@@ -359,7 +480,7 @@ mod tests {
         body.push(0x80);
         body.extend_from_slice(&(trailer.len() as u32).to_be_bytes());
         body.extend_from_slice(trailer);
-        assert!(unframe(&body).is_err());
+        assert!(unframe(&HeaderMap::new(), &body).is_err());
     }
 
     /// Build a `google.protobuf.Value` wrapping a Struct with the given (key, string) entries.

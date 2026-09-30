@@ -7,6 +7,10 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
   rust-ci:
@@ -16,13 +20,14 @@ jobs:
       run:
         working-directory: gateway-rust
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: "gateway-rust -> target"
           # Only save the cache on main-branch pushes to avoid saturating the
@@ -33,27 +38,41 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Test
         run: cargo test
 
-      - name: Security audit
-        uses: rustsec/audit-check@v2.0.0
+      # Advisories, licences, bans and sources per deny.toml (supersedes the audit-only check).
+      - name: cargo deny
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: gateway-rust
+          manifest-path: gateway-rust/Cargo.toml
       # Release build is intentionally omitted: cargo test already verifies
       # compilation. The release binary is built inside the Dockerfile.
+
+  msrv:
+    name: MSRV (rust-version in Cargo.toml)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway-rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: "1.88"
+      - name: Check on the declared minimum toolchain
+        run: cargo check --locked
 
   trivy-scan:
     name: Trivy (gateway-rust Dockerfile)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Scan Dockerfile
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: gateway-rust

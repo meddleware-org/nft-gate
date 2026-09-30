@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { SuiGrpc, nonceMatches, isConsumedEvent, eventMatches, gateBlocksAccess } from '../src/chain.js'
 import { bytesToBase64 } from '../src/crypto.js'
+import { consumedEventType } from '../src/verify.js'
 
 // Pure match/parse helpers — mirror sui_rpc.rs unit tests.
 describe('chain helpers', () => {
@@ -25,17 +26,33 @@ describe('chain helpers', () => {
 
   // gRPC event shape: `eventType` + `sender` + `json`. eventMatches binds sender + gate only
   // (single-use is enforced by redemption tracking on the consumeDigest, not the event nonce).
+  const CONSUMED = consumedEventType('0xabc::access_gate::SoulboundAccessNFT')
+
   it('eventMatches on the gRPC event shape (eventType/json)', () => {
     const ev = {
       eventType: '0xabc::access_gate::AccessConsumedEvent',
-      sender: '0xowner',
-      json: { nonce: bytesToBase64(new TextEncoder().encode('nonce')), gate_id: '0xgate' },
+      sender: '0xa11ce',
+      json: { nonce: bytesToBase64(new TextEncoder().encode('nonce')), gate_id: '0x6a7e' },
     }
-    expect(isConsumedEvent(ev)).toBe(true)
-    expect(eventMatches(ev, '0xowner', '0xgate')).toBe(true)
-    expect(eventMatches(ev, '0xattacker', '0xgate')).toBe(false) // wrong sender
-    expect(eventMatches(ev, '0xowner', '0xwrong')).toBe(false) // wrong gate
-    expect(eventMatches(ev, '0xowner', undefined)).toBe(true) // gate unconstrained
+    expect(isConsumedEvent(ev, CONSUMED)).toBe(true)
+    expect(eventMatches(ev, '0xa11ce', '0x6a7e')).toBe(true)
+    expect(eventMatches(ev, '0xa77ac', '0x6a7e')).toBe(false) // wrong sender
+    expect(eventMatches(ev, '0xa11ce', '0xbad')).toBe(false) // wrong gate
+    expect(eventMatches(ev, '0xa11ce', undefined)).toBe(true) // gate unconstrained
+  })
+
+  it('matches the event type exactly: a look-alike package cannot forge a consume', () => {
+    const forged = { eventType: '0xbad::access_gate::AccessConsumedEvent', sender: '0xa11ce', json: { gate_id: '0x6a7e' } }
+    expect(isConsumedEvent(forged, CONSUMED)).toBe(false)
+    // Long-form (gRPC) and short-form addresses of the configured package are the same type.
+    const longForm = { eventType: `0x${'0'.repeat(61)}abc::access_gate::AccessConsumedEvent` }
+    expect(isConsumedEvent(longForm, CONSUMED)).toBe(true)
+    expect(isConsumedEvent({ eventType: '0xabc::access_gate::AccessConsumedEventX' }, CONSUMED)).toBe(false)
+  })
+
+  it('compares sender and gate ids in normalised form', () => {
+    const ev = { eventType: CONSUMED, sender: `0x${'0'.repeat(59)}a11ce`, json: { gate_id: '0x06A7E' } }
+    expect(eventMatches(ev, '0xA11CE', '0x6a7e')).toBe(true)
   })
 
   // Legacy JSON-RPC shape (`type`/`parsedJson`) stays supported so the helpers tolerate the
@@ -43,12 +60,12 @@ describe('chain helpers', () => {
   it('eventMatches still accepts the legacy type/parsedJson shape', () => {
     const ev = {
       type: '0xabc::access_gate::AccessConsumedEvent',
-      sender: '0xowner',
-      parsedJson: { nonce: [110, 111, 110, 99, 101], gate_id: '0xgate' },
+      sender: '0xa11ce',
+      parsedJson: { nonce: [110, 111, 110, 99, 101], gate_id: '0x6a7e' },
     }
-    expect(isConsumedEvent(ev)).toBe(true)
-    expect(eventMatches(ev, '0xowner', '0xgate')).toBe(true)
-    expect(eventMatches(ev, '0xowner', '0xwrong')).toBe(false)
+    expect(isConsumedEvent(ev, CONSUMED)).toBe(true)
+    expect(eventMatches(ev, '0xa11ce', '0x6a7e')).toBe(true)
+    expect(eventMatches(ev, '0xa11ce', '0xbad')).toBe(false)
   })
 
   // nonceMatches is retained (exported helper) even though the single-use path no longer calls it.

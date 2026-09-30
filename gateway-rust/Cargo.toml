@@ -1,7 +1,9 @@
 [package]
 name = "nft-gate-gateway"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2021"
+# The dependency graph's floor (checked in CI by the `msrv` job).
+rust-version = "1.88"
 license = "0BSD"
 description = "Generic NFT-gated reverse-proxy: verifies wallet-signed access proofs against on-chain NFT ownership, then forwards to any upstream."
 repository = "https://github.com/meddleware-org/nft-gate"
@@ -16,6 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 axum = "0.7"
+# In-flight request cap + load shedding (MAX_CONCURRENT_REQUESTS); same tower as axum 0.7.
+tower = { version = "0.5", features = ["limit", "load-shed"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
 # HTTP client: hyper 1.x + hyper-rustls instead of reqwest to avoid the
 # url → idna → icu_normalizer compile chain (~10 min on GHA).
@@ -29,17 +33,31 @@ serde_json = "1"
 base64 = "0.22"
 hex = "0.4"
 blake2 = "0.10"
-ed25519-dalek = "2"
+# ZIP-215 ed25519 verification — the rule Sui validators apply (pinned by conformance `zip215`).
+ed25519-consensus = "2"
 # secp256k1 / secp256r1 personal-message signature verification (Sui flags 0x01 / 0x02).
 k256 = { version = "0.13", features = ["ecdsa"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 # OsRng for nonce generation — much lighter than the full rand crate (no algorithms needed).
 rand_core = { version = "0.6", features = ["getrandom"] }
 # Shared TTL nonce store for horizontal scale-out (Redis protocol; works with Dragonfly).
-redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager"] }
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros"] }
+# Signing only (test fixtures); verification uses ed25519-consensus.
+ed25519-dalek = "2"
+# Property tests for the hand-rolled protobuf / gRPC-web readers (no panics on any input).
+proptest = "1"
+
+[profile.release]
+# Arithmetic overflow aborts instead of wrapping silently, even in release builds.
+overflow-checks = true
+# A panic stops the process (the supervisor restarts it with clean state) instead of leaving
+# poisoned locks behind in a half-alive server.
+panic = "abort"
+lto = true
+codegen-units = 1

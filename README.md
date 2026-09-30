@@ -36,7 +36,7 @@ npm run deploy
 wrangler secret put UPSTREAM_URL        # e.g. https://your-relay.example.com
 wrangler secret put NFT_TYPE            # e.g. 0x<pkg>::access_gate::SoulboundAccessNFT
 # …and set GATE_ID = "0x<gate id>" in wrangler.toml [vars]
-wrangler secret put UPSTREAM_AUTH_HEADERS  # e.g. CF-Access-Client-Id: <id>, CF-Access-Client-Secret: <secret>
+wrangler secret put UPSTREAM_AUTH_HEADERS  # JSON: [{"name":"CF-Access-Client-Id","value":"<id>"},{"name":"CF-Access-Client-Secret","value":"<secret>"}]
 
 # 5. Configure the route (edit wrangler.toml, then redeploy)
 npm run deploy

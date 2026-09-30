@@ -207,10 +207,29 @@ pub struct RedisNonceStore {
 }
 
 impl RedisNonceStore {
-    /// Connect to a Redis-protocol server (Redis or Dragonfly). Startup-time async.
+    /// Connect to a Redis-protocol server (Redis or Dragonfly). Startup-time async. Retries with
+    /// exponential backoff (0.5 s doubling, 6 attempts, ~16 s in total) so a gateway that starts
+    /// alongside its Redis does not crash-loop; gives up with the last error after that.
     pub async fn connect(url: &str, ttl_secs: u64) -> anyhow::Result<Self> {
         let client = redis::Client::open(url)?;
-        let conn = client.get_connection_manager().await?;
+        let mut delay = std::time::Duration::from_millis(500);
+        let mut attempt = 1;
+        let conn = loop {
+            match client.get_connection_manager().await {
+                Ok(conn) => break conn,
+                Err(e) if attempt < 6 => {
+                    tracing::warn!(error = %e, attempt, "redis connect failed; retrying");
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                    attempt += 1;
+                }
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "redis connect failed after {attempt} attempts: {e}"
+                    ))
+                }
+            }
+        };
         Ok(Self {
             conn,
             ttl_ms: ttl_secs.saturating_mul(1000),
@@ -275,38 +294,35 @@ impl RedisNonceStore {
             .map_err(|e| anyhow::anyhow!("redis redemption commit failed: {e}"))
     }
 
-    /// Release a lease on `key` (never a commit).
+    /// Release a lease on `key` (never a commit). A compare-and-delete in one Lua script, so a
+    /// commit landing between a separate GET and DEL can never be erased.
     async fn release_redemption(&self, key: &str) {
         let mut c = self.conn.clone();
-        let k = self.redeem_key(key);
-        if let Ok(Some(v)) = redis::cmd("GET")
-            .arg(&k)
-            .query_async::<Option<String>>(&mut c)
-            .await
-        {
-            if v == "committed" {
-                return;
-            }
+        let script = redis::Script::new(
+            "if redis.call('GET', KEYS[1]) == 'leased' then return redis.call('DEL', KEYS[1]) else return 0 end",
+        );
+        let res: redis::RedisResult<i64> =
+            script.key(self.redeem_key(key)).invoke_async(&mut c).await;
+        if let Err(e) = res {
+            // The lease still self-expires after REDEMPTION_LEASE_TTL_SECS.
+            tracing::warn!(error = %e, "redis redemption release failed; lease will expire");
         }
-        let _: redis::RedisResult<()> = redis::cmd("DEL").arg(&k).query_async(&mut c).await;
     }
 
-    /// Store `nonce` with a key TTL of `ttl_ms`. Best-effort: logs a warning on failure but
-    /// does not abort — `take_if_valid` will then fail closed on the missing key.
-    async fn insert(&self, nonce: String) -> (String, u64) {
+    /// Store `nonce` with a key TTL of `ttl_ms`. A failure is returned (the challenge endpoint
+    /// answers 503) rather than handing out a nonce that can never verify.
+    async fn insert(&self, nonce: String) -> anyhow::Result<(String, u64)> {
         let mut c = self.conn.clone();
         // SET key 1 PX <ttl> — random nonces don't collide, so NX is unnecessary.
-        let res: redis::RedisResult<()> = redis::cmd("SET")
+        redis::cmd("SET")
             .arg(self.key(&nonce))
             .arg(1)
             .arg("PX")
             .arg(self.ttl_ms)
-            .query_async(&mut c)
-            .await;
-        if let Err(e) = res {
-            tracing::warn!(error = %e, "redis nonce SET failed (issue best-effort; take will fail closed)");
-        }
-        (nonce, now_ms() + self.ttl_ms)
+            .query_async::<()>(&mut c)
+            .await
+            .map_err(|e| anyhow::anyhow!("redis nonce SET failed: {e}"))?;
+        Ok((nonce, now_ms() + self.ttl_ms))
     }
 
     /// Atomically consume `nonce` via `GETDEL` (Redis ≥6.2 / Dragonfly). Returns `false` on a
@@ -355,11 +371,12 @@ impl NonceStore {
         ))
     }
 
-    /// Issue a fresh random nonce. Returns `(nonce, expires_at_unix_ms)`.
-    pub async fn issue(&self) -> (String, u64) {
+    /// Issue a fresh random nonce. Returns `(nonce, expires_at_unix_ms)`, or an error when the
+    /// shared store cannot record it.
+    pub async fn issue(&self) -> anyhow::Result<(String, u64)> {
         let nonce = random_nonce();
         match self {
-            NonceStore::InMemory(s) => s.insert(nonce),
+            NonceStore::InMemory(s) => Ok(s.insert(nonce)),
             NonceStore::Redis(s) => s.insert(nonce).await,
         }
     }
@@ -408,7 +425,7 @@ impl NonceStore {
     pub async fn issue_specific(&self, nonce: &str) -> (String, u64) {
         match self {
             NonceStore::InMemory(s) => s.insert(nonce.to_string()),
-            NonceStore::Redis(s) => s.insert(nonce.to_string()).await,
+            NonceStore::Redis(s) => s.insert(nonce.to_string()).await.expect("redis insert"),
         }
     }
 }
@@ -420,7 +437,7 @@ mod tests {
     #[tokio::test]
     async fn nonce_valid_once_then_used() {
         let store = NonceStore::in_memory(300, 10_000);
-        let (nonce, _) = store.issue().await;
+        let (nonce, _) = store.issue().await.unwrap();
         assert!(store.take_if_valid(&nonce).await);
         assert!(!store.take_if_valid(&nonce).await); // already used
     }
@@ -434,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn expired_nonce_rejected() {
         let store = NonceStore::in_memory(0, 10_000); // immediate expiry
-        let (nonce, _) = store.issue().await;
+        let (nonce, _) = store.issue().await.unwrap();
         assert!(!store.take_if_valid(&nonce).await);
     }
 
@@ -442,7 +459,7 @@ mod tests {
     async fn hard_cap_bounds_memory() {
         let store = NonceStore::in_memory(300, 4); // cap 4
         for _ in 0..20 {
-            let _ = store.issue().await;
+            store.issue().await.unwrap();
         }
         if let NonceStore::InMemory(s) = &store {
             assert!(s.len() <= 4, "entry count must stay within the hard cap");
@@ -452,7 +469,7 @@ mod tests {
     #[tokio::test]
     async fn prune_drops_expired() {
         let store = NonceStore::in_memory(0, 10_000);
-        let _ = store.issue().await;
+        store.issue().await.unwrap();
         store.prune();
         if let NonceStore::InMemory(s) = &store {
             assert_eq!(s.len(), 0);
@@ -498,5 +515,29 @@ mod tests {
         let store = NonceStore::in_memory(300, 10_000);
         assert_eq!(store.try_lease_redemption("0xd", 0).await, Lease::Ok); // lease expires immediately
         assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Ok); // reclaimed, not stuck
+    }
+
+    // Real Redis/Dragonfly check of the Redis backend: GETDEL single-use, SET NX leases, and the
+    // Lua compare-and-delete release (which must never erase a commit). Keys are random and carry
+    // 60 s TTLs, so a shared instance is left clean. Run with:
+    //   REDIS_URL=redis://:<password>@127.0.0.1:6379 cargo test -- --ignored redis_backend
+    #[tokio::test]
+    #[ignore = "needs REDIS_URL pointing at a Redis/Dragonfly instance"]
+    async fn redis_backend_round_trip() {
+        let url = std::env::var("REDIS_URL").expect("REDIS_URL");
+        let store = NonceStore::redis(&url, 60).await.expect("connect");
+        let key = format!("test-{}", random_nonce());
+
+        assert_eq!(store.try_lease_redemption(&key, 60).await, Lease::Ok);
+        assert_eq!(store.try_lease_redemption(&key, 60).await, Lease::Leased);
+        store.release_redemption(&key).await; // Lua: deletes a `leased` value
+        assert_eq!(store.try_lease_redemption(&key, 60).await, Lease::Ok);
+        store.commit_redemption(&key, 60).await.expect("commit");
+        store.release_redemption(&key).await; // Lua: must NOT delete a `committed` value
+        assert_eq!(store.try_lease_redemption(&key, 60).await, Lease::Redeemed);
+
+        let (nonce, _) = store.issue().await.expect("issue");
+        assert!(store.take_if_valid(&nonce).await);
+        assert!(!store.take_if_valid(&nonce).await);
     }
 }

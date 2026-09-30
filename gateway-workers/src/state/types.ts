@@ -46,15 +46,25 @@ export interface NonceBackend {
 }
 
 /**
+ * The shard tags a nonce may carry: Cloudflare's continent codes (lower-cased) plus `g` (global).
+ * Anything else was not issued by this gateway, and routing on it would let a client mint Durable
+ * Object instances at will.
+ */
+export const NONCE_SHARDS: ReadonlySet<string> = new Set(['af', 'an', 'as', 'eu', 'na', 'oc', 'sa', 'g'])
+
+/**
  * Parse the shard tag embedded in a `<region>.<hex>` nonce so a consume call always routes
  * back to the shard that issued it, even under anycast region drift.
  *
  * @param nonce - A nonce in `<region>.<hex>` format.
- * @returns The region prefix (e.g. `"eu"`), or `"g"` if no dot is present.
+ * @returns The region prefix (e.g. `"eu"`), `"g"` if no dot is present, or `null` when the prefix
+ *   is not a known shard (the nonce is then invalid).
  */
-export function shardOfNonce(nonce: string): string {
+export function shardOfNonce(nonce: string): string | null {
   const dot = nonce.indexOf('.')
-  return dot > 0 ? nonce.slice(0, dot) : 'g'
+  if (dot <= 0) return 'g'
+  const shard = nonce.slice(0, dot)
+  return NONCE_SHARDS.has(shard) ? shard : null
 }
 
 /**

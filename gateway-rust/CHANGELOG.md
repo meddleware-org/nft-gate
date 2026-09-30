@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- Single-use: the consume event must be exactly `<NFT_TYPE package>::access_gate::AccessConsumedEvent`
+  (previously any `…::access_gate::AccessConsumedEvent` suffix, which a look-alike package could
+  emit). Sender and gate ids are compared in normalised form.
+- secp256r1 high-S signatures are rejected (`p256` does not enforce low-S); secp256k1 checks it
+  explicitly. ed25519 verification is ZIP-215 (`ed25519-consensus`), matching Sui.
+- The client IP for pre-auth rate limits is the TCP peer unless `TRUSTED_PROXY_HOPS` is set
+  (a spoofed `X-Forwarded-For` no longer selects the bucket).
+- `#![forbid(unsafe_code)]`; release builds keep overflow checks and abort on panic.
+
+### Added
+
+- `MAX_CONCURRENT_REQUESTS` (default 64) with load shedding (`503 gateway overloaded`).
+- `UPSTREAM_AUTH_HEADERS` (JSON) and `SUI_RPC_AUTH_HEADER`, at parity with `gateway-workers`.
+- `UPSTREAM_TIMEOUT_SECS`, `MAX_RESPONSE_BYTES`, `ALLOW_INSECURE_HTTP`, `TRUSTED_PROXY_HOPS`.
+- Connect/request timeouts and response caps on every outbound call; SIGTERM handling.
+- Negative + ZIP-215 conformance vectors; property tests for the protobuf/gRPC-web readers; an
+  ignored Redis/Dragonfly round-trip test (`redis_backend_round_trip`).
+- `deny.toml` (cargo-deny in CI), an MSRV job, crates.io trusted publishing, SBOM attestation.
+
+### Changed
+
+- gRPC-web: a response without a `grpc-status` (header or trailer), with a truncated or compressed
+  frame, or with a message over 4 MiB is an error; `GetTransaction` is retried 4× at 500 ms, then
+  reported as a chain error (`502`), like the Workers gateway.
+- A failed Redis nonce write returns `503`; Redis connect retries with backoff.
+- `GatewayConfig`'s `Debug` output redacts the Redis URL and header values.
+
 ## [0.0.3] - 2026-08-29
 
 ### Changed

@@ -65,12 +65,17 @@ export async function runQuotaGuard(env: Env): Promise<void> {
         `(requests ${(reqPct * 100).toFixed(0)}%, DO ${(doPct * 100).toFixed(0)}%)`,
     )
   }
+  // Dormant unless a NONCE_KV binding exists (wrangler.toml ships it commented out).
   if (env.NONCE_KV) {
-    if (worst >= DEGRADE_AT) {
-      await env.NONCE_KV.put('quota:degrade', '1', { expirationTtl: 3600 })
-      console.warn('quota-guard: set KV degrade flag (prefer KV backend)')
-    } else {
-      await env.NONCE_KV.delete('quota:degrade')
+    try {
+      if (worst >= DEGRADE_AT) {
+        await env.NONCE_KV.put('quota:degrade', '1', { expirationTtl: 3600 })
+        console.warn('quota-guard: set KV degrade flag (prefer KV backend)')
+      } else {
+        await env.NONCE_KV.delete('quota:degrade')
+      }
+    } catch (e) {
+      console.warn('quota-guard: KV degrade-flag update failed:', (e as Error).message)
     }
   }
 }
@@ -95,6 +100,7 @@ async function fetchMonthlyUsage(token: string, accountId: string): Promise<Usag
     } }
   }`
   const resp = await fetch(GRAPHQL_URL, {
+    signal: AbortSignal.timeout(15_000),
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({ query, variables: { accountTag: accountId, since: since.toISOString() } }),

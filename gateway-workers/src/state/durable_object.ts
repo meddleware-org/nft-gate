@@ -191,7 +191,9 @@ export class DurableObjectBackend implements NonceBackend {
   }
 
   async takeIfValid(nonce: string): Promise<boolean> {
-    return this.stub(shardOfNonce(nonce)).takeIfValid(nonce)
+    const shard = shardOfNonce(nonce)
+    if (shard === null) return false // forged shard tag: never issued here
+    return this.stub(shard).takeIfValid(nonce)
   }
 
   async rateCheck(address: string, maxPerMin: number, region: string): Promise<boolean> {

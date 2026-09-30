@@ -86,7 +86,10 @@ class MockChain implements ChainQuery {
   async ownsNft() {
     return this.owns
   }
-  async consumeTxValid() {
+  /** The event type the verifier asked for (asserted by the exact-type test). */
+  lastConsumedEventType: string | undefined
+  async consumeTxValid(_digest: string, _address: string, consumedEventType: string) {
+    this.lastConsumedEventType = consumedEventType
     return this.consumed
   }
   async gateAccessBlocked() {
@@ -103,6 +106,7 @@ function cfg(singleUse: boolean): Config {
     challengeTtlSecs: 300,
     singleUse,
     publicPaths: ['/v1/tip-config'],
+    challengeRateLimitPerMin: 30,
     rateLimitPerMin: 30,
     publicRateLimitPerMin: 120,
     publicCacheTtlSecs: 60,
@@ -219,9 +223,14 @@ describe('verifyAccessRequest decision', () => {
 
     store.issueSpecific('n6')
     const b6 = ed25519Token(7, 'n6', '0xdigest')
-    const ok = await verifyAccessRequest(cfg(true), store, b6.token, new MockChain(false, true))
+    const chain = new MockChain(false, true)
+    const ok = await verifyAccessRequest(cfg(true), store, b6.token, chain)
     // The digest is returned so the dispatcher can lease/commit it (single-use redemption).
     expect(ok).toEqual({ ok: true, address: b6.address, redemptionKey: '0xdigest' })
+    // The chain is asked for the configured package's exact event type, never a suffix.
+    expect(chain.lastConsumedEventType).toBe(
+      '0x0000000000000000000000000000000000000000000000000000000000000001::access_gate::AccessConsumedEvent',
+    )
   })
 
   it('single-use denies a missing consumeDigest', async () => {

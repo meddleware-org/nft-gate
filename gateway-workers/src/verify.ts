@@ -37,6 +37,26 @@ export function normalizeAddress(a: string): string {
 }
 
 /**
+ * Normalise the package address of a `<pkg>::<module>::<name>` type string so short and long
+ * address forms compare equal (gRPC renders framework and package addresses in long form).
+ */
+export function normalizeMoveType(t: string): string {
+  const i = t.indexOf('::')
+  return i > 0 ? normalizeAddress(t.slice(0, i)) + t.slice(i) : t
+}
+
+/**
+ * The exact `AccessConsumedEvent` type of the access_gate package that `nftType` names. Matching
+ * the full type (not a `::access_gate::AccessConsumedEvent` suffix) is what stops a look-alike
+ * package from emitting a forged consume event. Event and NFT types both carry the package's
+ * original id, so they share the package prefix across upgrades.
+ */
+export function consumedEventType(nftType: string): string {
+  const pkg = nftType.slice(0, nftType.indexOf('::'))
+  return `${normalizeAddress(pkg)}::access_gate::AccessConsumedEvent`
+}
+
+/**
  * Verify a Sui personal-message signature recovers `address` over `message`, dispatching on
  * the scheme flag byte. Serialized layout: `flag(1) || signature || pubkey` (base64).
  *
@@ -82,7 +102,9 @@ function verifyEd25519(address: string, message: Uint8Array, body: Uint8Array): 
   const digest = signingDigest(message)
   let ok = false
   try {
-    ok = ed25519.verify(sig, digest, pk)
+    // ZIP-215 (explicit): the rule Sui validators apply, so the gateway accepts exactly the
+    // ed25519 signatures the chain accepts. Pinned by the `zip215` conformance vector.
+    ok = ed25519.verify(sig, digest, pk, { zip215: true })
   } catch {
     return false
   }
@@ -121,11 +143,17 @@ function verifyEcdsa(
 export interface ChainQuery {
   ownsNft(address: string, nftType: string, gateId?: string): Promise<boolean>
   /**
-   * True if `consumeDigest` names a successful `access_gate::consume` transaction that emitted an
-   * `AccessConsumedEvent` for `address` (the sender) on `gateId`. Not bound to the challenge nonce
-   * — single-use is enforced by the redemption store keying on the digest.
+   * True if `consumeDigest` names a successful transaction that emitted an event of exactly
+   * `consumedEventType` (the configured access_gate package's `AccessConsumedEvent`) for `address`
+   * (the sender) on `gateId`. Not bound to the challenge nonce — single-use is enforced by the
+   * redemption store keying on the digest.
    */
-  consumeTxValid(consumeDigest: string, address: string, gateId?: string): Promise<boolean>
+  consumeTxValid(
+    consumeDigest: string,
+    address: string,
+    consumedEventType: string,
+    gateId?: string,
+  ): Promise<boolean>
   /**
    * True if `gateId` is paused AND its immutable `GatePolicy` has `pause_blocks_access` — holders
    * must then be denied until the gate is unpaused. False for gates without that policy flag
@@ -228,7 +256,7 @@ export async function verifyAccessRequest(
     }
     let ok: boolean
     try {
-      ok = await chain.consumeTxValid(proof.consumeDigest, address, cfg.gateId)
+      ok = await chain.consumeTxValid(proof.consumeDigest, address, consumedEventType(cfg.nftType), cfg.gateId)
     } catch {
       return { ok: false, denied: 'ChainError' }
     }

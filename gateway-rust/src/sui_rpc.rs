@@ -13,7 +13,7 @@ use crate::grpc::{
     ProtoReader, ProtoWriter,
 };
 use crate::http_client::HttpClient;
-use crate::verify::ChainQuery;
+use crate::verify::{normalize_address, normalize_move_type, ChainQuery};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -54,6 +54,11 @@ const LOO_OBJECTS: u32 = 1;
 // Object { ... Value json = 100 }
 const OBJECT_JSON: u32 = 100;
 
+/// `GetTransaction` attempts before a consume check reports a chain error (Workers parity).
+const TX_FETCH_ATTEMPTS: u32 = 4;
+/// Delay between `GetTransaction` attempts.
+const TX_FETCH_RETRY: Duration = Duration::from_millis(500);
+
 /// A cached result of an ownership query.
 struct CacheEntry {
     owns: bool,
@@ -70,9 +75,14 @@ pub struct SuiRpc {
 impl SuiRpc {
     /// Create a new client. `rpc_url` is the full-node origin (gRPC-web is served there). Set
     /// `cache_ttl_ms` to `0` to disable the ownership cache (default — every gated check is live).
-    pub fn new(client: HttpClient, rpc_url: String, cache_ttl_ms: u64) -> Self {
+    pub fn new(
+        client: HttpClient,
+        rpc_url: String,
+        cache_ttl_ms: u64,
+        auth: Option<crate::config::AuthHeader>,
+    ) -> Self {
         Self {
-            grpc: GrpcWeb::new(client, rpc_url),
+            grpc: GrpcWeb::new(client, rpc_url, auth),
             cache_ttl: Duration::from_millis(cache_ttl_ms),
             cache: Mutex::new(HashMap::new()),
         }
@@ -137,10 +147,21 @@ fn build_get_transaction(digest: &str) -> Vec<u8> {
     req.into_bytes()
 }
 
-/// True if a `GetTransactionResponse` contains an `AccessConsumedEvent` sent by `address` for
-/// `gate_id` (when constrained). A failed transaction emits no events, so the presence of a
-/// matching event already implies success — no separate status check is needed.
-fn response_has_consume(resp: &[u8], address: &str, gate_id: Option<&str>) -> bool {
+/// True if `a` and `b` name the same address (normalised form).
+fn same_address(a: Option<&str>, b: &str) -> bool {
+    a.is_some_and(|a| normalize_address(a) == normalize_address(b))
+}
+
+/// True if a `GetTransactionResponse` contains an event of exactly `consumed_type` sent by
+/// `address` for `gate_id` (when constrained). A failed transaction emits no events, so the
+/// presence of a matching event already implies success — no separate status check is needed.
+fn response_has_consume(
+    resp: &[u8],
+    address: &str,
+    consumed_type: &str,
+    gate_id: Option<&str>,
+) -> bool {
+    let want_type = normalize_move_type(consumed_type);
     let Some(tx) = field_bytes(resp, RESP_TRANSACTION) else {
         return false;
     };
@@ -151,17 +172,16 @@ fn response_has_consume(resp: &[u8], address: &str, gate_id: Option<&str>) -> bo
         let Field::Len(EVENTS_EVENTS, ev) = f else {
             continue;
         };
-        let is_consume = field_str(ev, EVENT_TYPE)
-            .map(|t| t.ends_with("::access_gate::AccessConsumedEvent"))
-            .unwrap_or(false);
-        if !is_consume || field_str(ev, EVENT_SENDER) != Some(address) {
+        let is_consume =
+            field_str(ev, EVENT_TYPE).is_some_and(|t| normalize_move_type(t) == want_type);
+        if !is_consume || !same_address(field_str(ev, EVENT_SENDER), address) {
             continue;
         }
         match gate_id {
             None => return true,
             Some(g) => {
                 let json = field_bytes(ev, EVENT_JSON).unwrap_or(&[]);
-                if value_find_string(json, "gate_id").as_deref() == Some(g) {
+                if same_address(value_find_string(json, "gate_id").as_deref(), g) {
                     return true;
                 }
             }
@@ -182,7 +202,7 @@ fn response_has_owned(resp: &[u8], gate_id: Option<&str>) -> bool {
             None => return true,
             Some(g) => {
                 let json = field_bytes(obj, OBJECT_JSON).unwrap_or(&[]);
-                if value_find_string(json, "gate_id").as_deref() == Some(g) {
+                if same_address(value_find_string(json, "gate_id").as_deref(), g) {
                     return true;
                 }
             }
@@ -234,16 +254,37 @@ impl ChainQuery for SuiRpc {
         &self,
         consume_digest: &str,
         address: &str,
+        consumed_event_type: &str,
         gate_id: Option<&str>,
     ) -> anyhow::Result<bool> {
-        let resp = self
-            .grpc
-            .call(
-                LEDGER_GET_TRANSACTION,
-                build_get_transaction(consume_digest),
-            )
-            .await?;
-        Ok(response_has_consume(&resp, address, gate_id))
+        // Retry briefly to absorb fullnode indexing lag after the client's finality wait — the same
+        // policy as the Workers gateway (4 attempts, 500 ms apart); every attempt failing is a
+        // chain error (502), never a silent "no consume".
+        let mut attempt = 1;
+        let resp = loop {
+            match self
+                .grpc
+                .call(
+                    LEDGER_GET_TRANSACTION,
+                    build_get_transaction(consume_digest),
+                )
+                .await
+            {
+                Ok(resp) => break resp,
+                Err(e) if attempt < TX_FETCH_ATTEMPTS => {
+                    tracing::debug!(error = %e, attempt, "GetTransaction failed; retrying");
+                    tokio::time::sleep(TX_FETCH_RETRY).await;
+                    attempt += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        Ok(response_has_consume(
+            &resp,
+            address,
+            consumed_event_type,
+            gate_id,
+        ))
     }
 }
 
@@ -287,50 +328,73 @@ mod tests {
         resp.into_bytes()
     }
 
-    const CONSUMED: &str = "0xpkg::access_gate::AccessConsumedEvent";
+    const CONSUMED: &str = "0xabc::access_gate::AccessConsumedEvent";
+    const OWNER: &str = "0xa11ce";
+    const GATE: &str = "0x6a7e";
 
     #[test]
     fn matches_a_valid_consume_for_sender_and_gate() {
-        let resp = tx_response(&[event(CONSUMED, "0xowner", "0xgate")]);
-        assert!(response_has_consume(&resp, "0xowner", Some("0xgate")));
-        assert!(response_has_consume(&resp, "0xowner", None));
+        let resp = tx_response(&[event(CONSUMED, OWNER, GATE)]);
+        assert!(response_has_consume(&resp, OWNER, CONSUMED, Some(GATE)));
+        assert!(response_has_consume(&resp, OWNER, CONSUMED, None));
     }
 
     #[test]
     fn rejects_wrong_sender_gate_or_event_type() {
-        let resp = tx_response(&[event(CONSUMED, "0xowner", "0xgate")]);
-        assert!(!response_has_consume(&resp, "0xattacker", Some("0xgate"))); // wrong sender
-        assert!(!response_has_consume(&resp, "0xowner", Some("0xwrong"))); // wrong gate
-        let other = tx_response(&[event(
-            "0xpkg::access_gate::PurchasedEvent",
-            "0xowner",
-            "0xgate",
+        let resp = tx_response(&[event(CONSUMED, OWNER, GATE)]);
+        assert!(!response_has_consume(
+            &resp,
+            "0xa77ac",
+            CONSUMED,
+            Some(GATE)
+        )); // wrong sender
+        assert!(!response_has_consume(&resp, OWNER, CONSUMED, Some("0xbad"))); // wrong gate
+        let other = tx_response(&[event("0xabc::access_gate::PurchasedEvent", OWNER, GATE)]);
+        assert!(!response_has_consume(&other, OWNER, CONSUMED, Some(GATE))); // wrong event
+    }
+
+    #[test]
+    fn rejects_a_look_alike_package_consume_event() {
+        // Any package can declare `access_gate::AccessConsumedEvent`; only the configured one counts.
+        let forged = tx_response(&[event(
+            "0xbad::access_gate::AccessConsumedEvent",
+            OWNER,
+            GATE,
         )]);
-        assert!(!response_has_consume(&other, "0xowner", Some("0xgate"))); // wrong event type
+        assert!(!response_has_consume(&forged, OWNER, CONSUMED, Some(GATE)));
+    }
+
+    #[test]
+    fn compares_types_and_ids_in_normalised_form() {
+        let long_type = format!("0x{}abc::access_gate::AccessConsumedEvent", "0".repeat(61));
+        let long_owner = format!("0x{}a11ce", "0".repeat(59));
+        let resp = tx_response(&[event(&long_type, &long_owner, "0x06A7E")]);
+        assert!(response_has_consume(&resp, "0xA11CE", CONSUMED, Some(GATE)));
     }
 
     #[test]
     fn rejects_when_no_events() {
         assert!(!response_has_consume(
             &tx_response(&[]),
-            "0xowner",
-            Some("0xgate")
+            OWNER,
+            CONSUMED,
+            Some(GATE)
         ));
-        assert!(!response_has_consume(&[], "0xowner", None)); // empty/failed tx
+        assert!(!response_has_consume(&[], OWNER, CONSUMED, None)); // empty/failed tx
     }
 
     #[test]
     fn owned_response_matches_gate() {
         // ListOwnedObjectsResponse { objects: [ Object { json } ] }
         let mut obj = ProtoWriter::new();
-        obj.bytes_field(OBJECT_JSON, &json_gate("0xgate"));
+        obj.bytes_field(OBJECT_JSON, &json_gate(GATE));
         let mut resp = ProtoWriter::new();
         resp.bytes_field(LOO_OBJECTS, &obj.into_bytes());
         let bytes = resp.into_bytes();
-        assert!(response_has_owned(&bytes, Some("0xgate")));
+        assert!(response_has_owned(&bytes, Some(GATE)));
         assert!(response_has_owned(&bytes, None));
-        assert!(!response_has_owned(&bytes, Some("0xother")));
-        assert!(!response_has_owned(&[], Some("0xgate")));
+        assert!(!response_has_owned(&bytes, Some("0x07e4")));
+        assert!(!response_has_owned(&[], Some(GATE)));
     }
 
     #[test]
@@ -343,30 +407,45 @@ mod tests {
 
     // Live end-to-end check against Sui testnet — the Rust analogue of the Workers real-chain
     // harness. Ignored by default (network); run with `cargo test -- --ignored`. Uses a known
-    // on-chain `access_gate::consume` transaction.
+    // `access_gate::consume` on the current testnet package/gate (0x1a81ca… / 0xcb8206…). Public
+    // fullnodes prune old checkpoints: when this digest ages out (NOT_FOUND), replace it with a
+    // recent one (`listEvents` on the AccessConsumedEvent type, descending).
     #[tokio::test]
     #[ignore = "hits Sui testnet gRPC; run with --ignored"]
     async fn live_consume_tx_valid() {
         use crate::http_client::HttpClient;
-        use crate::verify::ChainQuery;
+        use crate::verify::{consumed_event_type, ChainQuery};
         let rpc = SuiRpc::new(
             HttpClient::new().unwrap(),
             "https://fullnode.testnet.sui.io:443".to_string(),
             0,
+            None,
         );
-        let digest = "BbsLUnQGoWSDg6Kd1Hy8vGnyotJtz4hcp45sMv7cGHwU";
-        let addr = "0xe6b2810abfc5a6f37a375f73e3ba76cfc37584196e453255ad3c9ca2f0ede0ed";
-        let gate = "0x0485c1fa80e4c355c85ab99c0281a328d8fb5c60ac50ab64f10be0f8be792aba";
+        let pkg = "0x1a81ca177db039585e575beeeee4759466e55910e936a6733e38dbb65025eea4";
+        let consumed = consumed_event_type(&format!("{pkg}::access_gate::SoulboundAccessNFT"));
+        let digest = "5dTcMMDnFgmZ3mSa1yJoEf9EtbPwpWDmgL5qmF6AiT9K";
+        let addr = "0xa991ae11b0785718cd3ad1c616e804a4c083f431b3144bb845bdec651164864a";
+        let gate = "0xcb8206cab55902247daba61bad3d6c92f072425fe4034a98d6a22400d25a5f50";
         assert!(rpc
-            .consume_tx_valid(digest, addr, Some(gate))
+            .consume_tx_valid(digest, addr, &consumed, Some(gate))
             .await
             .unwrap());
         assert!(!rpc
-            .consume_tx_valid(digest, "0x01", Some(gate))
+            .consume_tx_valid(digest, "0x01", &consumed, Some(gate))
             .await
             .unwrap());
         assert!(!rpc
-            .consume_tx_valid(digest, addr, Some("0xdead"))
+            .consume_tx_valid(digest, addr, &consumed, Some("0xdead"))
+            .await
+            .unwrap());
+        // A look-alike package's event type never matches.
+        assert!(!rpc
+            .consume_tx_valid(
+                digest,
+                addr,
+                "0xbad::access_gate::AccessConsumedEvent",
+                Some(gate)
+            )
             .await
             .unwrap());
     }

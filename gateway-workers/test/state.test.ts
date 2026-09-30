@@ -4,6 +4,7 @@ import { DurableObjectBackend } from '../src/state/durable_object.js'
 import { KvBackend } from '../src/state/kv.js'
 import type { NonceRateState } from '../src/state/durable_object.js'
 import type { NonceBackend } from '../src/state/types.js'
+import { shardOfNonce } from '../src/state/types.js'
 
 interface TestEnv {
   NONCE_STATE: DurableObjectNamespace<NonceRateState>
@@ -106,6 +107,28 @@ describe('durable-object rate limiter', () => {
     // Can't read the row count through the backend, but issue/take must still work after
     // repeated eviction — a broken cap would error or corrupt state.
     const { nonce } = await store.issue('g', 300)
+    expect(await store.takeIfValid(nonce)).toBe(true)
+  })
+})
+
+describe('nonce shard tags', () => {
+  it('routes only known continent shards and the global shard', () => {
+    expect(shardOfNonce('eu.abc')).toBe('eu')
+    expect(shardOfNonce('g.abc')).toBe('g')
+    expect(shardOfNonce('abc')).toBe('g')
+    expect(shardOfNonce('zz.abc')).toBeNull()
+    expect(shardOfNonce('EU.abc')).toBeNull() // issued tags are lower-case
+  })
+
+  it('the Durable Object backend rejects a forged shard tag without touching a shard', async () => {
+    const store = new DurableObjectBackend(e.NONCE_STATE, 'region', 10_000)
+    expect(await store.takeIfValid('attacker-shard-1.deadbeef')).toBe(false)
+  })
+
+  it('a region-sharded nonce is accepted by the shard that issued it', async () => {
+    const store = new DurableObjectBackend(e.NONCE_STATE, 'region', 10_000)
+    const { nonce } = await store.issue('eu', 300)
+    expect(nonce.startsWith('eu.')).toBe(true)
     expect(await store.takeIfValid(nonce)).toBe(true)
   })
 })

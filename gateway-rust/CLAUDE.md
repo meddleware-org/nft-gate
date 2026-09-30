@@ -18,7 +18,9 @@ gateway reads are decoded. Field numbers are pinned from `MystenLabs/sui-apis` a
 live responses (`sui_rpc::tests::live_consume_tx_valid`, `--ignored`).
 
 - `consume_tx_valid` (single-use) is **digest-first**, mirroring the Workers gateway:
-  `LedgerService/GetTransaction` → an `AccessConsumedEvent` for this **sender + gate** (gate read via
+  `LedgerService/GetTransaction` (retried 4× at 500 ms) → an event of **exactly**
+  `<NFT_TYPE package>::access_gate::AccessConsumedEvent` (never a suffix match — any package can
+  declare an `access_gate` module) for this **sender + gate** (gate read via
   a recursive lookup of the event's `google.protobuf.Value` json, so no BCS field-order assumption).
   It is NOT bound to the challenge nonce — single-use is enforced by the redemption store below.
 - `owns_nft` (non-single-use) uses `StateService/ListOwnedObjects`, matching `gate_id` via the same
@@ -33,6 +35,18 @@ upstream response or `release`s on failure — so an interrupted upload leaves t
 while a duplicate can't double-spend it. Redis keys use the `nftgate:redeem:` prefix; the in-memory
 store mirrors the semantics. `REDEMPTION_LEASE_TTL_SECS` (120) / `REDEMPTION_RETENTION_SECS` (30d)
 tune the lease/retention windows. A `RedeemConflict` → `409`.
+
+## Hardening invariants
+
+- ed25519 is verified under ZIP-215 (`ed25519-consensus`); secp256k1/r1 reject high-S explicitly.
+  The shared conformance vectors (`negativeSignatures`, `zip215`) pin both gateways to Sui's rules.
+- gRPC-web responses must carry a `grpc-status` (header for trailers-only, else trailer frame);
+  anything else is an error. Messages are capped at 4 MiB; JSON lookups stop at depth 32.
+- Every outbound call has connect and whole-request timeouts and a response-size cap.
+- `MAX_CONCURRENT_REQUESTS` sheds load with `503`; `/healthz` is routed outside the cap.
+- The rate-limit client IP is the TCP peer unless `TRUSTED_PROXY_HOPS` says how many proxies to
+  trust; never the leftmost `X-Forwarded-For` entry (client-controlled).
+- `GatewayConfig`'s `Debug` is hand-written to redact secrets — keep it that way when adding fields.
 
 ## Axum architecture
 
@@ -62,8 +76,10 @@ does not enumerate paths — the handler checks them in order: `/healthz` → `/
 - Expiry is the Redis key TTL; no background prune needed.
 - Requires Redis ≥ 6.2 or Dragonfly for `GETDEL`. Older Redis needs `GET` + `DEL` (non-atomic —
   upgrade or use Dragonfly).
-- `RedisNonceStore::insert` fails best-effort (logs warning; `take_if_valid` then fails closed
-  on the missing key).
+- `RedisNonceStore::insert` returns an error on a failed write; the challenge endpoint answers
+  `503` instead of issuing a nonce that could never verify.
+- Redemption release is a Lua compare-and-delete (only a `leased` value is removed), so it can
+  never erase a concurrent commit.
 
 ## HTTP client
 

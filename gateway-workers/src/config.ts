@@ -6,8 +6,8 @@
  * Omitted vs. Rust (runtime-specific): `BIND_ADDR` (Workers has no listen socket);
  * `REDIS_URL` / `NONCE_MAX_ENTRIES` (the in-memory cap lives in the DO) /
  * `NONCE_PRUNE_INTERVAL_SECS` (the DO prunes on access) are superseded by the DO/KV backend.
- * Added (Workers-specific): `NONCE_BACKEND`, `NONCE_SHARD`, `SUI_RPC_AUTH_HEADER`,
- * `UPSTREAM_AUTH_HEADERS`, `QUOTA_GUARD_ENABLED`.
+ * Workers-specific: `NONCE_BACKEND`, `NONCE_SHARD`, `QUOTA_GUARD_ENABLED`. `SUI_RPC_AUTH_HEADER`
+ * and `UPSTREAM_AUTH_HEADERS` are shared with the Rust gateway in the same formats.
  */
 
 export interface Env {
@@ -19,6 +19,8 @@ export interface Env {
   SINGLE_USE?: string
   PUBLIC_PATHS?: string
   RATE_LIMIT_PER_MIN?: string
+  /** Per-client-IP budget for `GET /v1/challenge` per minute (0 disables). */
+  CHALLENGE_RATE_LIMIT_PER_MIN?: string
   PUBLIC_RATE_LIMIT_PER_MIN?: string
   PUBLIC_CACHE_TTL_SECS?: string
   MAX_BODY_BYTES?: string
@@ -38,11 +40,12 @@ export interface Env {
   /** Optional `Name: value` header line added to every Sui RPC call (secret). */
   SUI_RPC_AUTH_HEADER?: string
   /**
-   * Comma-separated `Name: value` header lines injected into every upstream (relay) request.
+   * Headers injected into every upstream (relay) request, as a JSON array of `{name, value}`.
    * Use this to pass Cloudflare Access service-token headers when the relay origin is
    * Access-locked (your CF-Access-protected origin hostname).
    *
-   * Format: `"CF-Access-Client-Id: <id>, CF-Access-Client-Secret: <secret>"`
+   * Format: `[{"name":"CF-Access-Client-Id","value":"<id>"},{"name":"CF-Access-Client-Secret","value":"<secret>"}]`
+   * (JSON, so a value may contain commas or colons). Same format in the Rust gateway.
    *
    * Set via `wrangler secret put UPSTREAM_AUTH_HEADERS` — never in wrangler.toml.
    */
@@ -52,8 +55,8 @@ export interface Env {
   /**
    * Comma-separated list of browser origins allowed to make cross-origin requests.
    * Only origins in this list receive an `Access-Control-Allow-Origin` header.
-   * Defaults to the two Meddleware app origins when absent.
-   * Example: `"https://sui-walrus.meddleware.co.uk,https://sui.meddleware.co.uk"`
+   * Defaults to the two Meddleware app origins when absent (the same list as wrangler.toml).
+   * Example: `"https://sui-walrus.meddleware.co.uk,https://dash.meddleware.co.uk"`
    */
   ALLOWED_ORIGINS?: string
   // ── bindings ──────────────────────────────────────────────────────────────
@@ -83,6 +86,8 @@ export interface Config {
   singleUse: boolean
   publicPaths: string[]
   rateLimitPerMin: number
+  /** Per-client-IP cap on `GET /v1/challenge` per minute (0 disables). */
+  challengeRateLimitPerMin: number
   /** Per-client-IP request cap for unauthenticated public paths (e.g. /v1/tip-config). */
   publicRateLimitPerMin: number
   /** Edge-cache TTL (s) for cacheable GET responses on public paths. 0 disables caching. */
@@ -123,14 +128,9 @@ function parseAuthHeader(v: string | undefined): { name: string; value: string }
   return { name: 'Authorization', value: v.trim() }
 }
 
-/**
- * Parse `UPSTREAM_AUTH_HEADERS`: comma-separated `Name: value` pairs.
- * Each entry follows the same `Name: value` format as `SUI_RPC_AUTH_HEADER`.
- * Entries that cannot be parsed (no colon) are silently skipped.
- */
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://sui-walrus.meddleware.co.uk',
-  'https://sui.meddleware.co.uk',
+  'https://dash.meddleware.co.uk',
 ]
 
 function parseAllowedOrigins(v: string | undefined): string[] {
@@ -141,12 +141,33 @@ function parseAllowedOrigins(v: string | undefined): string[] {
     .filter((s) => s.length > 0)
 }
 
-function parseUpstreamAuthHeaders(v: string | undefined): Array<{ name: string; value: string }> {
+/** An HTTP header field name (RFC 9110 token). */
+const HEADER_NAME_RE = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+
+/**
+ * Parse `UPSTREAM_AUTH_HEADERS`: a JSON array of `{ "name": …, "value": … }`. Anything else —
+ * invalid JSON, a non-array, a bad header name, a non-string value — throws, so a mistyped
+ * secret fails closed at startup instead of silently dropping the origin's credentials.
+ */
+export function parseUpstreamAuthHeaders(v: string | undefined): Array<{ name: string; value: string }> {
   if (!v || v.trim().length === 0) return []
-  return v
-    .split(',')
-    .map((entry) => parseAuthHeader(entry.trim()))
-    .filter((h): h is { name: string; value: string } => h !== undefined)
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(v)
+  } catch {
+    throw new Error('UPSTREAM_AUTH_HEADERS must be a JSON array of {"name","value"} objects')
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('UPSTREAM_AUTH_HEADERS must be a JSON array of {"name","value"} objects')
+  }
+  return parsed.map((h, i) => {
+    const name = (h as { name?: unknown })?.name
+    const value = (h as { value?: unknown })?.value
+    if (typeof name !== 'string' || !HEADER_NAME_RE.test(name) || typeof value !== 'string' || /[\r\n]/.test(value)) {
+      throw new Error(`UPSTREAM_AUTH_HEADERS[${i}] must be {"name": <header name>, "value": <string>}`)
+    }
+    return { name, value }
+  })
 }
 
 /**
@@ -186,6 +207,7 @@ export function loadConfig(env: Env): Config {
       .map((s) => s.trim())
       .filter((s) => s.length > 0),
     rateLimitPerMin: numOr(env.RATE_LIMIT_PER_MIN, 30),
+    challengeRateLimitPerMin: numOr(env.CHALLENGE_RATE_LIMIT_PER_MIN, 30),
     publicRateLimitPerMin: numOr(env.PUBLIC_RATE_LIMIT_PER_MIN, 120),
     publicCacheTtlSecs: numOr(env.PUBLIC_CACHE_TTL_SECS, 60),
     maxBodyBytes: numOr(env.MAX_BODY_BYTES, 262144),

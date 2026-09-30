@@ -91,3 +91,60 @@ describe('router', () => {
     expect(nonce.includes('.')).toBe(true) // <region>.<hex> shard-tagged form
   })
 })
+
+describe('router hardening', () => {
+  it('rate-limits GET /v1/challenge per client IP (parity with Rust), with CORS on the 429', async () => {
+    const headers = { 'CF-Connecting-IP': '203.0.113.7', origin: ALLOWED_ORIGIN }
+    for (let i = 0; i < 30; i++) {
+      expect((await call('GET', '/v1/challenge', headers)).status).toBe(200)
+    }
+    const limited = await call('GET', '/v1/challenge', headers)
+    expect(limited.status).toBe(429)
+    expect(await limited.json()).toEqual({ error: 'rate limit exceeded' })
+    expect(corsOrigin(limited)).toBe(ALLOWED_ORIGIN)
+    // Another client is unaffected.
+    expect((await call('GET', '/v1/challenge', { 'CF-Connecting-IP': '203.0.113.8' })).status).toBe(200)
+  })
+
+  it('every response varies on Origin', async () => {
+    for (const res of [
+      await call('GET', '/v1/challenge', { origin: ALLOWED_ORIGIN }),
+      await call('GET', '/v1/challenge'),
+      await call('POST', '/v1/blob-upload'),
+    ]) {
+      expect(res.headers.get('vary')).toMatch(/Origin/)
+    }
+  })
+
+  it('an unreachable upstream on a public path fails closed with a JSON body and CORS', async () => {
+    const res = await call('POST', '/v1/tip-config', { origin: ALLOWED_ORIGIN, 'CF-Connecting-IP': '203.0.113.9' })
+    expect(res.status).toBeGreaterThanOrEqual(500)
+    expect(res.headers.get('content-type')).toMatch(/json/)
+    expect(corsOrigin(res)).toBe(ALLOWED_ORIGIN)
+  })
+})
+
+describe('public-path edge cache', () => {
+  it('drops the query string from the cache key and the forwarded request', async () => {
+    const seen: string[] = []
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      seen.push(new Request(input).url)
+      return new Response('{"tip":1}', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      const first = await call('GET', '/v1/tip-config?bust=1', { 'CF-Connecting-IP': '198.51.100.20' })
+      expect(first.status).toBe(200)
+      await new Promise((r) => setTimeout(r, 50)) // cache.put runs in waitUntil
+      const second = await call('GET', '/v1/tip-config?bust=2', { 'CF-Connecting-IP': '198.51.100.20' })
+      expect(second.status).toBe(200)
+      expect(await second.text()).toBe('{"tip":1}')
+    } finally {
+      globalThis.fetch = realFetch
+    }
+    // The upstream saw the bare path, and only once: the second, differently-busted request was a
+    // cache hit.
+    expect(seen).toEqual(['https://upstream.invalid/v1/tip-config'])
+  })
+})
+

@@ -39,6 +39,8 @@ export function resolveAllowedOrigin(
 export function withCors(res: Response, allowedOrigin: string | null): Response {
   const out = new Response(res.body, res)
   if (allowedOrigin) out.headers.set('access-control-allow-origin', allowedOrigin)
+  // The ACAO value depends on the request Origin, so any cache in front must key on it.
+  out.headers.append('vary', 'Origin')
   for (const [k, v] of Object.entries(CORS_STATIC_HEADERS)) {
     out.headers.set(k, v)
   }

@@ -16,6 +16,7 @@
 import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { fetchAccessNfts } from '@meddleware/nft-gate-client'
 import type { ChainQuery } from './verify.js'
+import { normalizeAddress, normalizeMoveType } from './verify.js'
 import { base64ToBytes } from './crypto.js'
 
 type Json = unknown
@@ -178,7 +179,12 @@ export class SuiGrpc implements ChainQuery {
    * @param gateId - Optional gate object ID constraint.
    * @returns `true` if the transaction confirms a matching consume.
    */
-  async consumeTxValid(consumeDigest: string, address: string, gateId?: string): Promise<boolean> {
+  async consumeTxValid(
+    consumeDigest: string,
+    address: string,
+    consumedEventType: string,
+    gateId?: string,
+  ): Promise<boolean> {
     const res = (await this.getTransaction(consumeDigest)) as Record<string, Json> | null
     // The gRPC result is a oneof: `{ $kind: 'Transaction', Transaction }` on success, or
     // `{ $kind: 'FailedTransaction', FailedTransaction }` when the transaction aborted.
@@ -187,7 +193,7 @@ export class SuiGrpc implements ChainQuery {
     const status = tx?.status as { success?: boolean } | undefined
     if (!status?.success) return false
     const events = (Array.isArray(tx?.events) ? (tx?.events as Json[]) : []) as Json[]
-    return events.some((ev) => isConsumedEvent(ev) && eventMatches(ev, address, gateId))
+    return events.some((ev) => isConsumedEvent(ev, consumedEventType) && eventMatches(ev, address, gateId))
   }
 }
 
@@ -237,7 +243,6 @@ function eventFields(ev: Json): Json {
   return pointer(ev, ['json']) ?? pointer(ev, ['parsedJson'])
 }
 
-/** True if the event's type ends with `::access_gate::AccessConsumedEvent`. */
 /**
  * True if a `Gate` object's JSON (gRPC core shape: fields flat) is paused and its policy has
  * `pause_blocks_access`. Gates without a `policy` (pre-policy package versions) never block.
@@ -247,9 +252,13 @@ export function gateBlocksAccess(gateJson: Json): boolean {
   return Boolean(g && g.paused === true && g.policy && g.policy.pause_blocks_access === true)
 }
 
-export function isConsumedEvent(ev: Json): boolean {
+/**
+ * True if the event's type is exactly `expectedType` (package address normalised). A suffix match
+ * would accept an `AccessConsumedEvent` emitted by any package with an `access_gate` module.
+ */
+export function isConsumedEvent(ev: Json, expectedType: string): boolean {
   const t = eventType(ev)
-  return t !== undefined && t.endsWith('::access_gate::AccessConsumedEvent')
+  return t !== undefined && normalizeMoveType(t) === normalizeMoveType(expectedType)
 }
 
 /**
@@ -279,8 +288,9 @@ export function nonceMatches(eventNonce: Json, nonce: string): boolean {
  * `consumeDigest`, so the event nonce is intentionally not checked here (see `consumeTxValid`).
  */
 export function eventMatches(ev: Json, address: string, gateId?: string): boolean {
-  const senderOk = pointerStr(ev, ['sender']) === address
-  const fields = eventFields(ev)
-  const gateOk = gateId === undefined ? true : pointerStr(fields, ['gate_id']) === gateId
+  const sender = pointerStr(ev, ['sender'])
+  const senderOk = sender !== undefined && normalizeAddress(sender) === normalizeAddress(address)
+  const gate = pointerStr(eventFields(ev), ['gate_id'])
+  const gateOk = gateId === undefined ? true : gate !== undefined && normalizeAddress(gate) === normalizeAddress(gateId)
   return senderOk && gateOk
 }
