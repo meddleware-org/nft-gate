@@ -1,6 +1,6 @@
 # @meddleware/nft-gate-gateway
 
-[![npm](https://img.shields.io/npm/v/%40meddleware%2Fnft-gate-gateway-workers)](https://www.npmjs.com/package/@meddleware/nft-gate-gateway)
+[![npm](https://img.shields.io/npm/v/%40meddleware%2Fnft-gate-gateway)](https://www.npmjs.com/package/@meddleware/nft-gate-gateway)
 [![License: 0BSD](https://img.shields.io/badge/license-0BSD-blue)](LICENSE)
 
 Cloudflare Workers implementation of the [nft-gate](../README.md) NFT-gated reverse proxy.

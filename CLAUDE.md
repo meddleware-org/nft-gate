@@ -21,6 +21,14 @@ of an on-chain Meddleware access NFT. Two wire-identical implementations are pro
 - **Public paths bypass auth.** Configured in `PUBLIC_PATHS` (Workers) / the same env var (Rust).
   The default is `/v1/tip-config` so relay tip-config endpoints are publicly readable.
 
+## Versioning
+
+One version for every artifact (D16): the npm package `@meddleware/nft-gate-gateway`
+(`gateway-workers/package.json`), the crate `nft-gate-gateway` (`gateway-rust/Cargo.toml`) and the
+image. Bump both files together, then tag `v<version>`. `scripts/check-versions.sh` runs in Node
+CI, Rust CI and every publish workflow. It fails when the two files differ, or when a tag does not
+match them.
+
 ## Wire protocol coupling
 
 Both implementations MUST produce identical decisions for any given proof token. The coupling is

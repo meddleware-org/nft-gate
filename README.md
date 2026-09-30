@@ -1,6 +1,6 @@
 # nft-gate
 
-[![npm](https://img.shields.io/npm/v/%40meddleware%2Fnft-gate-gateway-workers)](https://www.npmjs.com/package/@meddleware/nft-gate-gateway)
+[![npm](https://img.shields.io/npm/v/%40meddleware%2Fnft-gate-gateway)](https://www.npmjs.com/package/@meddleware/nft-gate-gateway)
 [![Crates.io](https://img.shields.io/crates/v/nft-gate-gateway)](https://crates.io/crates/nft-gate-gateway)
 [![License: 0BSD](https://img.shields.io/badge/license-0BSD-blue)](LICENSE)
 

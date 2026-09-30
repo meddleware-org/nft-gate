@@ -33,8 +33,7 @@ jobs:
         with:
           toolchain: stable
 
-      # No tag == version check: this repository publishes the npm package and the crate from
-      # the same v* tag at different versions (idempotent: an already-published version is skipped).
+      # The reusable verify workflow (rust-ci.yml) checks npm == crate == tag (D16).
       - name: Check if already published
         id: check
         run: |
