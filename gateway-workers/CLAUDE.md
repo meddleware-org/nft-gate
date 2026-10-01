@@ -53,6 +53,13 @@ wrangler secret put UPSTREAM_AUTH_HEADERS   # optional: CF Access service token
 
 Non-sensitive defaults are set in `wrangler.toml` under `[vars]`. Do not put secrets in `[vars]`.
 
+`UPSTREAM_AUTH_HEADERS` may instead be a GitHub secret on this repo. When it is set,
+`.github/workflows/deploy-workers.yml` validates it with `parseUpstreamAuthHeaders` and ships it
+with the code as one Worker version (`versions upload` → `versions secret put` → `versions deploy`);
+GitHub is then the source of truth and each deploy overwrites the Cloudflare value. When it is
+unset the workflow runs plain `wrangler deploy`, keeping the secrets stored in Cloudflare. Keep
+`src/config.ts` free of imports: the workflow loads it under Node type stripping.
+
 ## State machine: Durable Objects vs KV
 
 **Default: Durable Objects** (`NONCE_STATE` binding, `NONCE_BACKEND=durable-object`)

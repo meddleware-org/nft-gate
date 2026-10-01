@@ -2,6 +2,14 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- The `Deploy Workers` workflow also accepts `UPSTREAM_AUTH_HEADERS` as a GitHub secret: when set it
+  is validated and deployed with the code as one Worker version; when unset the deploy is unchanged
+  (`wrangler deploy`, Cloudflare-stored secrets).
+
 ## [0.0.13] - 2026-10-01
 
 Versions are aligned from this release: the npm package, the crate and the image share one version.

@@ -114,6 +114,11 @@ locked to this Worker via Cloudflare Access, then point `UPSTREAM_URL` at it.
    # [{"name":"CF-Access-Client-Id","value":"<id>"},{"name":"CF-Access-Client-Secret","value":"<secret>"}]
    ```
 
+   Alternatively store the same JSON as the GitHub secret `UPSTREAM_AUTH_HEADERS` and deploy with
+   the `Deploy Workers` workflow: it validates the value and ships it with the code as one
+   version. While that GitHub secret exists it overrides the Cloudflare value on every workflow
+   deploy, so rotate it in GitHub.
+
 5. The Worker injects these headers on every upstream `fetch`. Direct browser or bot traffic to
    the origin gets an Access login page or `403`, depending on the policy fallback.
 

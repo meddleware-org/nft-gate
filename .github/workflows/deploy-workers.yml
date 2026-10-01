@@ -1,9 +1,18 @@
 name: Deploy Workers
 
-# Deploys the LIVE NFT-gated relay Worker. Manual only: a deploy can require a coordinated secret
-# change (see the walrus runbook), so it never runs on push. The job re-runs the full CI first and
-# executes in the protected `production` environment (configure required reviewers in the
-# repository settings).
+# Deploys the LIVE NFT-gated relay Worker (`nft-gate-gateway`). Manual only: a deploy can require a
+# coordinated secret change (see the walrus runbook), so it never runs on push. The job re-runs the
+# full CI first and executes in the protected `production` environment (configure required
+# reviewers in the repository settings).
+#
+# Worker secrets live in Cloudflare and persist across deploys. One of them can also be supplied
+# from GitHub:
+#   - GitHub secret `UPSTREAM_AUTH_HEADERS` set: it is validated, then the new code and that secret
+#     go live together (versions upload → versions secret put → versions deploy), so a format or
+#     credential change never runs against the wrong code. While it is set, GitHub is the source of
+#     truth: every deploy re-applies it, so rotate it here (a value changed only in Cloudflare is
+#     overwritten on the next deploy).
+#   - Not set: `wrangler deploy`, keeping the secrets already stored in Cloudflare.
 
 on:
   workflow_dispatch:
@@ -38,8 +47,34 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Validate UPSTREAM_AUTH_HEADERS (when supplied from GitHub)
+        env:
+          UPSTREAM_AUTH_HEADERS: ${{ secrets.UPSTREAM_AUTH_HEADERS }}
+        # The Worker's own parser: a malformed value fails here instead of taking the gateway down.
+        run: |
+          if [ -z "${UPSTREAM_AUTH_HEADERS}" ]; then
+            echo "UPSTREAM_AUTH_HEADERS not set in GitHub: the Worker keeps the value stored in Cloudflare."
+            exit 0
+          fi
+          node --input-type=module -e "
+            const { parseUpstreamAuthHeaders } = await import('./src/config.ts');
+            const n = parseUpstreamAuthHeaders(process.env.UPSTREAM_AUTH_HEADERS).length;
+            if (n === 0) throw new Error('UPSTREAM_AUTH_HEADERS has no headers');
+            console.log('UPSTREAM_AUTH_HEADERS: ' + n + ' header(s)');"
+
       - name: Deploy
-        run: npm run deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          UPSTREAM_AUTH_HEADERS: ${{ secrets.UPSTREAM_AUTH_HEADERS }}
+          TAG: run-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          if [ -z "${UPSTREAM_AUTH_HEADERS}" ]; then
+            npm run deploy
+            exit 0
+          fi
+          # Code and secret switch together: upload a version (no traffic), add the secret to it as a
+          # tagged version, then send all traffic to that version.
+          npx wrangler versions upload --message "${GITHUB_SHA}" --tag "${TAG}-code"
+          printf '%s' "${UPSTREAM_AUTH_HEADERS}" | npx wrangler versions secret put UPSTREAM_AUTH_HEADERS --message "${GITHUB_SHA} + UPSTREAM_AUTH_HEADERS" --tag "${TAG}"
+          npx wrangler versions deploy --version-tag "${TAG}@100" --message "${GITHUB_SHA}" --yes
