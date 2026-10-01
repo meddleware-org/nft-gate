@@ -4,6 +4,11 @@
   "type": "module",
   "description": "Cloudflare Workers implementation of the nft-gate gateway: a wire-identical, drop-in sibling of the Rust gateway that gates any HTTP upstream behind an access_gate NFT.",
   "license": "0BSD",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/meddleware-org/nft-gate.git",
+    "directory": "gateway-workers"
+  },
   "main": "src/index.ts",
   "files": [
     "src",
