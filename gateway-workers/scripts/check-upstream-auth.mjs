@@ -1,10 +1,13 @@
 // Pre-deploy check for a GitHub-held UPSTREAM_AUTH_HEADERS (used by deploy-workers.yml).
 //
 // 1. Parses the value with the Worker's own parser (a malformed value fails the deploy).
-// 2. Prints non-revealing diagnostics: header names, value lengths, whether a Cloudflare Access
-//    service-token pair has the expected shape (client id `<32 hex>.access`, secret `<64 hex>`).
-// 3. When UPSTREAM_CHECK_URL is set, sends the headers to that origin URL and fails unless it
-//    answers 2xx — so credentials the origin rejects never reach production traffic.
+// 2. Prints non-revealing diagnostics (header names, value lengths) and FAILS when a Cloudflare
+//    Access service-token header has the wrong shape: client id `<32 hex>.access`; secret
+//    `cfast_<40 alnum><8 checksum>` (tokens from 2026-08-26) or the older `<64 hex>`.
+// 3. When UPSTREAM_CHECK_URL is set, sends the headers to that origin URL. An Access or origin
+//    rejection fails the deploy. A bot challenge (`cf-mitigated: challenge`: the zone's Bot Fight
+//    Mode can challenge CI runners and cannot be skipped on the free plan) is inconclusive and only
+//    warns — verify the live route after the deploy.
 //
 // Never prints a value. Run from gateway-workers/ (Node 24 strips the .ts types).
 import { parseUpstreamAuthHeaders } from '../src/config.ts'
@@ -14,7 +17,7 @@ if (headers.length === 0) throw new Error('UPSTREAM_AUTH_HEADERS has no headers'
 
 const SHAPES = {
   'cf-access-client-id': [/^[0-9a-f]{32}\.access$/, '<32 hex>.access (39 chars)'],
-  'cf-access-client-secret': [/^[0-9a-f]{64}$/, '<64 hex> (64 chars)'],
+  'cf-access-client-secret': [/^(cfast_[A-Za-z0-9_-]{48}|[0-9a-f]{64})$/, 'cfast_<48 alnum> (54 chars) or <64 hex>'],
 }
 let shapeProblems = 0
 for (const { name, value } of headers) {
@@ -31,7 +34,8 @@ for (const { name, value } of headers) {
 }
 console.log(`UPSTREAM_AUTH_HEADERS: ${headers.length} header(s)`)
 if (shapeProblems > 0) {
-  console.log(`::warning::${shapeProblems} Cloudflare Access header value(s) do not have the expected shape`)
+  console.log(`::error::${shapeProblems} Cloudflare Access header value(s) do not have the documented shape; not deploying.`)
+  process.exit(1)
 }
 
 const url = process.env.UPSTREAM_CHECK_URL
@@ -45,7 +49,9 @@ if (!url) {
   })
   const via = res.headers.get('cf-access-domain') ? ' (rejected by Cloudflare Access)' : ''
   console.log(`Origin check ${new URL(url).host}: HTTP ${res.status}${via}`)
-  if (!res.ok) {
+  if (res.headers.get('cf-mitigated') === 'challenge') {
+    console.log('::warning::Origin check inconclusive: the zone challenged this runner (Bot Fight Mode). Verify the live route after the deploy.')
+  } else if (!res.ok) {
     // Say who rejected it (Access, a WAF/bot rule, or the origin) without echoing any request data.
     const title = ((await res.text()).match(/<title>([^<]{0,120})<\/title>/i) ?? [])[1]
     for (const h of ['server', 'cf-mitigated', 'cf-access-domain', 'www-authenticate']) {
