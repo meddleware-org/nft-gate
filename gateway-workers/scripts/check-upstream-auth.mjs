@@ -46,6 +46,12 @@ if (!url) {
   const via = res.headers.get('cf-access-domain') ? ' (rejected by Cloudflare Access)' : ''
   console.log(`Origin check ${new URL(url).host}: HTTP ${res.status}${via}`)
   if (!res.ok) {
+    // Say who rejected it (Access, a WAF/bot rule, or the origin) without echoing any request data.
+    const title = ((await res.text()).match(/<title>([^<]{0,120})<\/title>/i) ?? [])[1]
+    for (const h of ['server', 'cf-mitigated', 'cf-access-domain', 'www-authenticate']) {
+      if (res.headers.get(h)) console.log(`  ${h}: ${res.headers.get(h)}`)
+    }
+    if (title) console.log(`  page title: ${title.trim()}`)
     console.log('::error::The origin rejected UPSTREAM_AUTH_HEADERS; not deploying.')
     process.exit(1)
   }
