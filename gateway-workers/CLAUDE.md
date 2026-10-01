@@ -19,7 +19,9 @@ transaction digest, so `consumeEventMatches` fetches that exact transaction (`co
 `include: { events: true }`) and confirms it succeeded and emitted a matching `AccessConsumedEvent`
 (sender + gate; the consume is deliberately **not** bound to the challenge nonce — see
 "Redemption" below). This is precise and needs no event-by-sender scan. Ownership (non
-single-use) uses `fetchAccessNfts` from `@meddleware/nft-gate-client` over the same gRPC client.
+single-use) uses `ownsAccessNft` from `@meddleware/access-gate-client` over the same gRPC client:
+exact NFT type, every owned-object page read until the first match (a list too long to read
+throws, which denies).
 
 The gRPC event shape differs from JSON-RPC (`eventType`/`json` vs `type`/`parsedJson`); the pure
 helpers in `chain.ts` read both so they tolerate the documented `json`-shape variation. gRPC
@@ -130,6 +132,7 @@ propagate to both Workers and Rust test suites.
   consistency (same audited primitives, same hash outputs).
 - `@meddleware/nft-gate-client`: `wire.ts` re-exports `personalMessageForNonce`,
   `decodeAccessProof`, `AccessProof` directly — no duplication.
+- `@meddleware/access-gate-client`: `chain.ts` uses `ownsAccessNft` for the ownership check.
 
 ## Invariants
 

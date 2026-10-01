@@ -2,7 +2,9 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
-## [Unreleased]
+## [0.0.13] - 2026-10-01
+
+Versions are aligned from this release: the npm package, the crate and the image share one version.
 
 ### Security
 
@@ -29,6 +31,11 @@ All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 - `Vary: Origin` on every response.
 - Conformance: `negativeSignatures` (high-S k1/r1, non-canonical ed25519 s, wrong intent,
   truncated, flags 0x03/0x05/0x06) and a `zip215` acceptance vector.
+
+- Ownership checks use `@meddleware/access-gate-client` `ownsAccessNft`: exact NFT type at the
+  package's original id, and every owned-object page is read (previously only the first page, so a
+  holder with many objects could be denied). `@meddleware/nft-gate-client` 0.0.13 supplies only the
+  wire format.
 
 ### Fixed
 

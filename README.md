@@ -15,7 +15,9 @@ Two wire-identical implementations are provided. Choose one based on your deploy
 
 Both implementations serve the same wire protocol and verify the same [conformance vectors](conformance/).
 
-The client-side counterpart — challenge fetching, proof construction, PTB builders — lives in [`@meddleware/nft-gate-client`](https://github.com/meddleware-org/nft-gate-client) on npm.
+The client-side counterparts are on npm: the wire protocol (challenge fetching, proof construction) in
+[`@meddleware/nft-gate-client`](https://github.com/meddleware-org/nft-gate-client), and the `access_gate`
+reads and transaction builders in [`@meddleware/access-gate-client`](https://github.com/meddleware-org/access-gate-client).
 
 ## Quickstart (Cloudflare Workers)
 

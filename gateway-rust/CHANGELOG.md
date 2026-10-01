@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.13] - 2026-10-01
+
+Versions are aligned from this release: the crate, the npm package and the image share one version
+(the crate jumps from 0.0.5).
 
 ### Security
 

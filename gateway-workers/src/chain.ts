@@ -3,7 +3,7 @@
  *
  * Public Sui fullnodes have deprecated JSON-RPC (`suix_queryEvents`, `sui_getTransactionBlock`,
  * `suix_getOwnedObjects` now return `-32601 Method not found`), so the gateway queries the chain
- * over gRPC — the same transport `@meddleware/walrus-client` and `@meddleware/nft-gate-client`
+ * over gRPC — the same transport `@meddleware/walrus-client` and `@meddleware/access-gate-client`
  * already use. The pure match/parse helpers are exported for unit tests; the gRPC round-trips are
  * covered by the localnet/integration loop.
  *
@@ -14,7 +14,7 @@
  */
 
 import { SuiGrpcClient } from '@mysten/sui/grpc'
-import { fetchAccessNfts } from '@meddleware/nft-gate-client'
+import { ownsAccessNft } from '@meddleware/access-gate-client'
 import type { ChainQuery } from './verify.js'
 import { normalizeAddress, normalizeMoveType } from './verify.js'
 import { base64ToBytes } from './crypto.js'
@@ -88,9 +88,10 @@ export class SuiGrpc implements ChainQuery {
   }
 
   /**
-   * Uncached, live ownership query over gRPC `listOwnedObjects`. Reuses `fetchAccessNfts` from
-   * `@meddleware/nft-gate-client` (the same gRPC core-API parse the frontend uses), so the
-   * gateway and client agree on what counts as a held access NFT.
+   * Uncached, live ownership query over gRPC `listOwnedObjects`. Reuses `ownsAccessNft` from
+   * `@meddleware/access-gate-client` (the same exact-type parse the frontends use), so the
+   * gateway and the clients agree on what counts as a held access NFT. Every page is read until
+   * the first match; a list too long to read throws, which denies (fail closed).
    *
    * @param address - Sui address to query.
    * @param nftType - NFT struct type to filter by.
@@ -98,8 +99,7 @@ export class SuiGrpc implements ChainQuery {
    * @returns `true` if at least one qualifying NFT is owned.
    */
   private async ownsNftLive(address: string, nftType: string, gateId?: string): Promise<boolean> {
-    const nfts = await fetchAccessNfts(this.client, address, nftType, gateId)
-    return nfts.length > 0
+    return ownsAccessNft(this.client, address, nftType, gateId)
   }
 
   /**
