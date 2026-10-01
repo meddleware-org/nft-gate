@@ -42,14 +42,18 @@ wait. `gateway-rust/` reaches the same data over a hand-rolled gRPC-web client (
 
 ## Secrets pattern
 
-All sensitive config is injected via Wrangler secrets (never hardcoded in source or `wrangler.toml`):
+Sensitive config is injected via Wrangler secrets (never hardcoded in source or `wrangler.toml`):
 
 ```bash
-wrangler secret put UPSTREAM_URL
-wrangler secret put SUI_RPC_URL
-wrangler secret put NFT_TYPE
-wrangler secret put UPSTREAM_AUTH_HEADERS   # optional: CF Access service token
+wrangler secret put UPSTREAM_URL            # the private origin
+wrangler secret put UPSTREAM_AUTH_HEADERS   # optional: CF Access service token (or the GitHub secret)
+wrangler secret put SUI_RPC_AUTH_HEADER     # optional: authenticated RPC
 ```
+
+Public values are `[vars]` in `wrangler.toml`: `NFT_TYPE` (a public on-chain type; it was a secret
+until 0.0.14), `GATE_ID`, `SUI_RPC_URL`, `ALLOWED_ORIGINS` and the limits. A secret and a var may not
+share a name, so the Deploy Workers workflow deletes a secret listed in its `RETIRED_SECRETS` from a
+pending version before uploading code that defines it as a var.
 
 Non-sensitive defaults are set in `wrangler.toml` under `[vars]`. Do not put secrets in `[vars]`.
 

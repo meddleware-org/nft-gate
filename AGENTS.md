@@ -75,10 +75,8 @@ Both test suites will pick up the new vectors automatically.
 ```bash
 cd gateway-workers && npm run deploy
 
-# Set required secrets after first deploy
+# Set the required secret after first deploy; NFT_TYPE, GATE_ID and SUI_RPC_URL are wrangler.toml [vars]
 wrangler secret put UPSTREAM_URL
-wrangler secret put SUI_RPC_URL
-wrangler secret put NFT_TYPE
 ```
 
 ### Build and run Rust Docker image

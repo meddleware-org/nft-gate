@@ -61,6 +61,25 @@ jobs:
           fi
           node scripts/check-upstream-auth.mjs
 
+      # A Worker secret and a [vars] entry may not share a name. When a value moves from a secret to
+      # wrangler.toml [vars], list it here: its secret is deleted from a new, NOT-yet-deployed version,
+      # which the upload below then builds on, so the live version keeps serving until the final
+      # deploy. A name that is no longer a secret is reported and skipped. If the delete fails for any
+      # other reason the upload fails on the name clash and nothing is deployed.
+      - name: Retire secrets that became plain vars
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          RETIRED_SECRETS: NFT_TYPE
+        run: |
+          for name in ${RETIRED_SECRETS}; do
+            if printf 'y\n' | npx wrangler versions secret delete "${name}" --message "retire ${name} (now a var)"; then
+              echo "Deleted secret ${name} from a pending version."
+            else
+              echo "Secret ${name} not present (already retired) — skipping."
+            fi
+          done
+
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

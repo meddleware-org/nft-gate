@@ -6,6 +6,12 @@ All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
 ### Changed
 
+- `NFT_TYPE` is a `[vars]` entry in `wrangler.toml` instead of a Worker secret: it is a public on-chain
+  type. The Deploy Workers workflow retires the old secret from a pending version first (a secret and a
+  var may not share a name), so the switch has no downtime.
+- `ALLOWED_ORIGINS` (and the code default) adds `https://sui-token-deployer.meddleware.co.uk`: the
+  standalone token deployer uploads icons through the gated relay too (workspace decision D21).
+
 - The `Deploy Workers` workflow also accepts `UPSTREAM_AUTH_HEADERS` as a GitHub secret: when set it
   is validated and deployed with the code as one Worker version; when unset the deploy is unchanged
   (`wrangler deploy`, Cloudflare-stored secrets).

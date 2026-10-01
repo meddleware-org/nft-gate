@@ -71,9 +71,9 @@ Run these once from the `gateway-workers/` directory after the Worker exists:
 wrangler secret put UPSTREAM_URL
 # Value: https://your-relay.example.com
 
-# The on-chain NFT type to check ownership against.
-wrangler secret put NFT_TYPE
-# Value: 0x<PACKAGE_ID>::access_gate::SoulboundAccessNFT
+# The pass type (NFT_TYPE), the gate (GATE_ID) and the RPC URL (SUI_RPC_URL) are public values:
+# set them in wrangler.toml [vars], e.g.
+#   NFT_TYPE = "0x<ACCESS_GATE_ORIGINAL_ID>::access_gate::SoulboundAccessNFT"
 
 # CF Access service-token headers to authenticate to your origin (if Access-locked).
 # Omit if your upstream is publicly reachable or uses another auth mechanism.
@@ -173,7 +173,7 @@ The Rust gateway enforces the same cap with the same status codes (see
 | --- | --- | --- | --- |
 | `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream (set via `wrangler secret put`) |
 | `SUI_RPC_URL` | ✓ | `https://fullnode.testnet.sui.io:443` | Sui fullnode (queried over gRPC-web); change to mainnet for production |
-| `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` or `SoulboundAccessNFT` (set via `wrangler secret put`); any other type — e.g. a fungible `Coin<T>` — is rejected at startup |
+| `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` or `SoulboundAccessNFT`, with `<pkg>` the access_gate original id (a `[vars]` entry in `wrangler.toml`); any other type — e.g. a fungible `Coin<T>` — is rejected at startup |
 | `GATE_ID` | ✓ | — | The gate whose passes are accepted; also read live so a paused gate with `pause_blocks_access` denies holders (`403 the gate is paused`) |
 | `SINGLE_USE` | | `false` | Require a `consumeDigest` naming a successful `access_gate::consume` by the proof address on `GATE_ID`; each digest is redeemable once |
 | `PUBLIC_PATHS` | | `/v1/tip-config` | Comma-separated paths served without authentication |

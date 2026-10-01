@@ -11,11 +11,6 @@
 #     This is kept as a secret so it does not appear in this public file and is
 #     not overwritten by `wrangler deploy`.
 #
-#   NFT_TYPE (required — set after publishing your access_gate contract on-chain):
-#     wrangler secret put NFT_TYPE
-#     Value: "<PACKAGE_ID>::access_gate::SoulboundAccessNFT"
-#     Update this whenever you redeploy the on-chain contract.
-#
 #   UPSTREAM_AUTH_HEADERS (required for CF-Access-locked origin):
 #     wrangler secret put UPSTREAM_AUTH_HEADERS
 #     Value (JSON): [{"name":"CF-Access-Client-Id","value":"<id>"},{"name":"CF-Access-Client-Secret","value":"<secret>"}]
@@ -38,16 +33,18 @@ compatibility_flags = ["nodejs_compat"]
 
 # ── config (parity with the Rust gateway env; see README.md for the mapping) ─────────────────
 [vars]
-# UPSTREAM_URL and NFT_TYPE are set via `wrangler secret put` (see above) so that
-# deployment-specific values never appear in this public file and are never overwritten
-# by `wrangler deploy`. Do not add them here.
+# UPSTREAM_URL is set via `wrangler secret put` (see above) so the private origin never appears in
+# this public file. Do not add it here.
 
 # Public fullnode — safe to keep as a plain var (no sensitive information).
 SUI_RPC_URL = "https://fullnode.testnet.sui.io:443"
 
+# Required: the pass type this gateway accepts, `<access_gate original id>::access_gate::AccessNFT`
+# or `…::SoulboundAccessNFT`. A public on-chain type, so a plain var (it was a secret until 0.0.14).
+NFT_TYPE = "0x1a81ca177db039585e575beeeee4759466e55910e936a6733e38dbb65025eea4::access_gate::SoulboundAccessNFT"
 # Required: the gate whose passes are accepted — the testnet Walrus relay gate on access_gate
-# 0x1a81ca… (NFT_TYPE secret = 0x1a81ca…::access_gate::SoulboundAccessNFT). Change it only together
-# with walrus-ui's VITE_ACCESS_GATE_ID_TESTNET (and the NFT_TYPE secret) — never one without the other.
+# 0x1a81ca…. Change GATE_ID and NFT_TYPE only together with the apps' VITE_ACCESS_GATE_ID_TESTNET
+# (walrus-ui, dashboard, token-deployer-ui) — never one without the others.
 GATE_ID = "0xcb8206cab55902247daba61bad3d6c92f072425fe4034a98d6a22400d25a5f50"
 SINGLE_USE = "true"
 PUBLIC_PATHS = "/v1/tip-config"
@@ -75,7 +72,7 @@ NONCE_MAX_ENTRIES = "1000000"
 QUOTA_GUARD_ENABLED = "false"
 # Comma-separated list of browser origins allowed to make cross-origin requests.
 # Only these origins receive Access-Control-Allow-Origin in responses.
-ALLOWED_ORIGINS = "https://sui-walrus.meddleware.co.uk,https://dash.meddleware.co.uk"
+ALLOWED_ORIGINS = "https://sui-walrus.meddleware.co.uk,https://dash.meddleware.co.uk,https://sui-token-deployer.meddleware.co.uk"
 
 # ── nonce store + rate limiter: region-sharded, SQLite-backed Durable Objects (free-tier) ────
 [[durable_objects.bindings]]

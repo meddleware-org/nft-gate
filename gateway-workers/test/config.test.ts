@@ -52,15 +52,18 @@ describe('loadConfig — UPSTREAM_AUTH_HEADERS', () => {
 })
 
 describe('loadConfig — ALLOWED_ORIGINS', () => {
-  it('defaults to the two Meddleware app origins when env var is absent', () => {
+  it('defaults to the three Meddleware app origins when env var is absent', () => {
     const cfg = loadConfig(baseEnv)
-    expect(cfg.allowedOrigins).toContain('https://sui-walrus.meddleware.co.uk')
-    expect(cfg.allowedOrigins).toContain('https://dash.meddleware.co.uk')
+    expect(cfg.allowedOrigins).toEqual([
+      'https://sui-walrus.meddleware.co.uk',
+      'https://dash.meddleware.co.uk',
+      'https://sui-token-deployer.meddleware.co.uk',
+    ])
   })
 
-  it('defaults to the two Meddleware app origins when env var is empty string', () => {
+  it('defaults to the three Meddleware app origins when env var is empty string', () => {
     const cfg = loadConfig({ ...baseEnv, ALLOWED_ORIGINS: '' })
-    expect(cfg.allowedOrigins).toHaveLength(2)
+    expect(cfg.allowedOrigins).toHaveLength(3)
   })
 
   it('parses a comma-separated list of origins', () => {

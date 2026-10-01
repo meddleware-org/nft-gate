@@ -56,7 +56,7 @@ export interface Env {
    * Comma-separated list of browser origins allowed to make cross-origin requests.
    * Only origins in this list receive an `Access-Control-Allow-Origin` header.
    * Defaults to the two Meddleware app origins when absent (the same list as wrangler.toml).
-   * Example: `"https://sui-walrus.meddleware.co.uk,https://dash.meddleware.co.uk"`
+   * Example: `"https://sui-walrus.meddleware.co.uk,https://dash.meddleware.co.uk,https://sui-token-deployer.meddleware.co.uk"`
    */
   ALLOWED_ORIGINS?: string
   // ── bindings ──────────────────────────────────────────────────────────────
@@ -131,6 +131,7 @@ function parseAuthHeader(v: string | undefined): { name: string; value: string }
 const DEFAULT_ALLOWED_ORIGINS = [
   'https://sui-walrus.meddleware.co.uk',
   'https://dash.meddleware.co.uk',
+  'https://sui-token-deployer.meddleware.co.uk',
 ]
 
 function parseAllowedOrigins(v: string | undefined): string[] {

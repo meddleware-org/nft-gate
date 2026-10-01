@@ -38,9 +38,8 @@ npm run deploy        # deploy to Cloudflare (requires wrangler login)
 
 ```bash
 wrangler secret put UPSTREAM_URL         # e.g. https://your-relay.example.com
-wrangler secret put SUI_RPC_URL          # e.g. https://fullnode.mainnet.sui.io:443
-wrangler secret put NFT_TYPE             # e.g. 0x<pkg>::access_gate::AccessNFT
 wrangler secret put UPSTREAM_AUTH_HEADERS  # optional: CF Access service token headers
+# NFT_TYPE, GATE_ID and SUI_RPC_URL are public: set them in wrangler.toml [vars]
 ```
 
 ## Version
