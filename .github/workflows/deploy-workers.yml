@@ -7,7 +7,8 @@ name: Deploy Workers
 #
 # Worker secrets live in Cloudflare and persist across deploys. One of them can also be supplied
 # from GitHub:
-#   - GitHub secret `UPSTREAM_AUTH_HEADERS` set: it is validated, then the new code and that secret
+#   - GitHub secret `UPSTREAM_AUTH_HEADERS` set: it is checked (scripts/check-upstream-auth.mjs; with
+#     the repo variable `UPSTREAM_CHECK_URL` set, the origin must accept it), then the new code and that secret
 #     go live together (versions upload → versions secret put → versions deploy), so a format or
 #     credential change never runs against the wrong code. While it is set, GitHub is the source of
 #     truth: every deploy re-applies it, so rotate it here (a value changed only in Cloudflare is
@@ -47,20 +48,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate UPSTREAM_AUTH_HEADERS (when supplied from GitHub)
+      - name: Check UPSTREAM_AUTH_HEADERS (when supplied from GitHub)
         env:
           UPSTREAM_AUTH_HEADERS: ${{ secrets.UPSTREAM_AUTH_HEADERS }}
-        # The Worker's own parser: a malformed value fails here instead of taking the gateway down.
+          UPSTREAM_CHECK_URL: ${{ vars.UPSTREAM_CHECK_URL }}
+        # The Worker's own parser plus non-revealing shape diagnostics; with UPSTREAM_CHECK_URL set,
+        # the headers must also get a 2xx from the origin. A bad value stops here, before any upload.
         run: |
           if [ -z "${UPSTREAM_AUTH_HEADERS}" ]; then
             echo "UPSTREAM_AUTH_HEADERS not set in GitHub: the Worker keeps the value stored in Cloudflare."
             exit 0
           fi
-          node --input-type=module -e "
-            const { parseUpstreamAuthHeaders } = await import('./src/config.ts');
-            const n = parseUpstreamAuthHeaders(process.env.UPSTREAM_AUTH_HEADERS).length;
-            if (n === 0) throw new Error('UPSTREAM_AUTH_HEADERS has no headers');
-            console.log('UPSTREAM_AUTH_HEADERS: ' + n + ' header(s)');"
+          node scripts/check-upstream-auth.mjs
 
       - name: Deploy
         env:
