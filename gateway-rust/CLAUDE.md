@@ -44,6 +44,7 @@ tune the lease/retention windows. A `RedeemConflict` → `409`.
   anything else is an error. Messages are capped at 4 MiB; JSON lookups stop at depth 32.
 - Every outbound call has connect and whole-request timeouts and a response-size cap.
 - `MAX_CONCURRENT_REQUESTS` sheds load with `503`; `/healthz` is routed outside the cap.
+- CORS mirrors the Workers gateway (`cors.ts`): exact `ALLOWED_ORIGINS` match only, the same grants, `Vary: Origin`, preflight before auth, headers on error responses too.
 - The rate-limit client IP is the TCP peer unless `TRUSTED_PROXY_HOPS` says how many proxies to
   trust; never the leftmost `X-Forwarded-For` entry (client-controlled).
 - `GatewayConfig`'s `Debug` is hand-written to redact secrets — keep it that way when adding fields.

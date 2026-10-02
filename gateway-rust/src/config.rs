@@ -35,6 +35,8 @@
 //!   address is the client IP). With N > 0 the client IP is the Nth `X-Forwarded-For` entry from
 //!   the right, i.e. the address the outermost trusted proxy saw.
 //! - `UPSTREAM_TIMEOUT_SECS` — whole-request timeout for upstream calls (default: `120`).
+//! - `ALLOWED_ORIGINS` — comma-separated browser origins allowed to call the gateway (CORS; e.g.
+//!   `https://app.example`). Unset → none: browsers get no `Access-Control-Allow-Origin` grant.
 //! - `MAX_RESPONSE_BYTES` — cap on a buffered upstream response (default: `16777216` = 16 MiB).
 //! - `ALLOW_INSECURE_HTTP` — `1` permits `http://` for `UPSTREAM_URL` / `SUI_RPC_URL` (localnet or
 //!   an in-cluster upstream); otherwise both must be `https://` (default: unset).
@@ -70,6 +72,8 @@ pub struct GatewayConfig {
     pub single_use: bool,
     /// Paths served WITHOUT auth (proxied straight through), e.g. `/v1/tip-config`.
     pub public_paths: Vec<String>,
+    /// Browser origins granted CORS (exact match); empty → none.
+    pub allowed_origins: Vec<String>,
     /// Per-address request budget per minute (post-auth).
     pub rate_limit_per_min: u32,
     /// Per-IP request budget for the challenge endpoint per minute (pre-auth).
@@ -123,6 +127,7 @@ impl std::fmt::Debug for GatewayConfig {
             .field("gate_id", &self.gate_id)
             .field("single_use", &self.single_use)
             .field("public_paths", &self.public_paths)
+            .field("allowed_origins", &self.allowed_origins)
             .field("redis_url", &self.redis_url.as_ref().map(|_| "<redacted>"))
             .field("upstream_auth_headers", &names)
             .field(
@@ -284,6 +289,11 @@ impl GatewayConfig {
         let max_response_bytes = env_or("MAX_RESPONSE_BYTES", "16777216")
             .parse()
             .unwrap_or(16_777_216);
+        let allowed_origins = env_or("ALLOWED_ORIGINS", "")
+            .split(',')
+            .map(|o| o.trim().trim_end_matches('/').to_string())
+            .filter(|o| !o.is_empty())
+            .collect();
         let allow_http = env_or("ALLOW_INSECURE_HTTP", "") == "1";
         check_scheme("UPSTREAM_URL", &upstream_url, allow_http)?;
         check_scheme("SUI_RPC_URL", &sui_rpc_url, allow_http)?;
@@ -301,6 +311,7 @@ impl GatewayConfig {
             challenge_ttl_secs,
             single_use,
             public_paths,
+            allowed_origins,
             rate_limit_per_min,
             challenge_rate_limit_per_min,
             max_body_bytes,

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- CORS with an origin allowlist (`ALLOWED_ORIGINS`), matching the Workers gateway: the request
+  `Origin` is reflected only on an exact match, every response (errors included) carries the
+  grants and `Vary: Origin`, and a preflight is answered before rate limits and auth. Unset → no
+  browser origin is granted.
+
 ### Fixed
 
 - Redis connection attempts and commands time out after 5 s (`ConnectionManagerConfig`), so a

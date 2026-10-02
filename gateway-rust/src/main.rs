@@ -37,7 +37,8 @@ mod verify;
 
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{header, HeaderMap, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use axum::{Json, Router};
@@ -218,11 +219,52 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
     }
 }
 
+/// Grants every response carries — the same set as the Workers gateway (`cors.ts`).
+const CORS_GRANTS: [(&str, &str); 4] = [
+    (
+        "access-control-allow-methods",
+        "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS",
+    ),
+    (
+        "access-control-allow-headers",
+        "authorization, content-type, x-access-proof",
+    ),
+    ("access-control-expose-headers", "location, upload-offset"),
+    ("access-control-max-age", "86400"),
+];
+
+/// CORS as the Workers gateway does it: a preflight is answered here, before rate limits and auth;
+/// every response (errors included) carries the grants and `Vary: Origin`; the request `Origin` is
+/// reflected only on an exact `ALLOWED_ORIGINS` match — otherwise no `Access-Control-Allow-Origin`.
+async fn cors(State(state): State<Arc<AppState>>, req: Request, next: Next) -> Response {
+    let allowed = req
+        .headers()
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .filter(|o| state.cfg.allowed_origins.iter().any(|a| a == o))
+        .and_then(|o| HeaderValue::from_str(o).ok());
+    let mut resp = if req.method() == Method::OPTIONS {
+        StatusCode::NO_CONTENT.into_response()
+    } else {
+        next.run(req).await
+    };
+    let headers = resp.headers_mut();
+    for (name, value) in CORS_GRANTS {
+        headers.insert(name, HeaderValue::from_static(value));
+    }
+    headers.append(header::VARY, HeaderValue::from_static("Origin"));
+    if let Some(origin) = allowed {
+        headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
+    }
+    resp
+}
+
 /// Construct the axum [`Router`] with the shared [`AppState`]. `/healthz` is answered directly and
 /// is never shed (so probes stay truthful under load); everything else goes through the single
 /// [`handle`] fallback behind a `MAX_CONCURRENT_REQUESTS` cap that answers `503` at once when full.
 fn build_router(state: Arc<AppState>) -> Router {
     let max_in_flight = state.cfg.max_concurrent_requests;
+    let cors_layer = middleware::from_fn_with_state(state.clone(), cors);
     let gated = Router::new().fallback(any(handle)).with_state(state).layer(
         ServiceBuilder::new()
             .layer(HandleErrorLayer::new(|_: tower::BoxError| async {
@@ -234,6 +276,7 @@ fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .merge(gated)
+        .layer(cors_layer)
 }
 
 #[tokio::main]
@@ -346,6 +389,7 @@ pub(crate) mod tests_support {
             challenge_ttl_secs: 300,
             single_use: false,
             public_paths: vec!["/v1/tip-config".into()],
+            allowed_origins: vec!["https://app.example".into()],
             rate_limit_per_min: 30,
             challenge_rate_limit_per_min: 30,
             max_body_bytes: 262144,
@@ -424,6 +468,95 @@ mod tests {
         assert_eq!(health.status(), StatusCode::OK);
         let challenge = app.oneshot(get("/v1/challenge")).await.unwrap();
         assert_eq!(challenge.status(), StatusCode::OK);
+    }
+
+    fn cors_app() -> Router {
+        let cfg = tests_support::test_cfg();
+        let http = HttpClient::new().unwrap();
+        build_router(Arc::new(AppState {
+            chain: SuiRpc::new(http.clone(), cfg.sui_rpc_url.clone(), 0, None),
+            store: NonceStore::in_memory(300, 100),
+            limiter: RateLimiter::new(30),
+            ip_limiter: RateLimiter::new(30),
+            http,
+            cfg,
+        }))
+    }
+
+    fn with_origin(
+        method: Method,
+        path: &str,
+        origin: Option<&str>,
+    ) -> axum::http::Request<axum::body::Body> {
+        let mut b = axum::http::Request::builder().method(method).uri(path);
+        if let Some(o) = origin {
+            b = b.header(header::ORIGIN, o);
+        }
+        b.body(axum::body::Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_is_answered_before_auth_for_an_allowed_origin() {
+        use tower::ServiceExt;
+        let resp = cors_app()
+            .oneshot(with_origin(
+                Method::OPTIONS,
+                "/v1/blob-upload-relay",
+                Some("https://app.example"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let h = resp.headers();
+        assert_eq!(
+            h[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://app.example"
+        );
+        assert_eq!(
+            h["access-control-allow-headers"],
+            "authorization, content-type, x-access-proof"
+        );
+        assert_eq!(h[header::VARY], "Origin");
+    }
+
+    #[tokio::test]
+    async fn cors_never_reflects_an_unlisted_or_absent_origin() {
+        use tower::ServiceExt;
+        for origin in [
+            Some("https://evil.example"),
+            Some("https://app.example.evil"),
+            None,
+        ] {
+            let resp = cors_app()
+                .oneshot(with_origin(Method::OPTIONS, "/v1/challenge", origin))
+                .await
+                .unwrap();
+            assert!(
+                resp.headers()
+                    .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                    .is_none(),
+                "{origin:?}"
+            );
+            assert_eq!(resp.headers()[header::VARY], "Origin");
+        }
+    }
+
+    #[tokio::test]
+    async fn cors_headers_are_on_error_responses_too() {
+        use tower::ServiceExt;
+        let resp = cors_app()
+            .oneshot(with_origin(
+                Method::POST,
+                "/v1/blob-upload-relay",
+                Some("https://app.example"),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN],
+            "https://app.example"
+        );
     }
 
     #[test]

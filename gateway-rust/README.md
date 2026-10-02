@@ -107,6 +107,7 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 | `TRUSTED_PROXY_HOPS` | | `0` | Reverse proxies in front of the gateway. `0`: the client IP is the TCP peer (forwarding headers ignored). `N`: the Nth `X-Forwarded-For` entry from the right (behind the k8s ingress alone, `1`) |
 | `MAX_CONCURRENT_REQUESTS` | | `64` | In-flight request cap; excess requests get `503 gateway overloaded` at once (`/healthz` is exempt) |
 | `UPSTREAM_TIMEOUT_SECS` | | `120` | Whole-request timeout for upstream calls |
+| `ALLOWED_ORIGINS` | | unset | Comma-separated browser origins granted CORS (exact match, reflected with `Vary: Origin`; preflights answered before auth). Unset: no browser origin is granted — same policy as the Workers gateway |
 | `MAX_RESPONSE_BYTES` | | `16777216` | Cap on a buffered upstream response |
 | `UPSTREAM_AUTH_HEADERS` | | — | JSON array `[{"name":…,"value":…}]` of headers added to every upstream request (secret; same format as `gateway-workers`); invalid JSON aborts startup |
 | `SUI_RPC_AUTH_HEADER` | | — | `Name: value` header added to every Sui RPC call (secret; a bare value means `Authorization`) |
