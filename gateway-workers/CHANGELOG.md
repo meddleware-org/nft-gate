@@ -2,6 +2,13 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [0.0.16] - 2026-10-02
+
+### Changed
+
+- `@meddleware/access-gate-client` 0.0.3: `ownsAccessNft` compares the configured `GATE_ID`
+  normalised, and an NFT whose gate id is not an address is ignored.
+
 ## [0.0.15] - 2026-10-02
 
 ### Changed
