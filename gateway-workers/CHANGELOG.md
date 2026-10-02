@@ -2,6 +2,16 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [0.0.15] - 2026-10-02
+
+### Changed
+
+- `@meddleware/access-gate-client` 0.0.2 (the version-gated `access_gate` client; `ownsAccessNft`
+  is unchanged) and `@meddleware/nft-gate-client` 0.0.14.
+- The shared `proofDecodeRejects` conformance vectors (oversized token, non-ASCII fields) are
+  asserted here and in the Rust gateway.
+- ESLint (typescript-eslint recommended) runs in CI.
+
 ## [0.0.14] - 2026-10-02
 
 ### Changed

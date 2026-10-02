@@ -1,6 +1,6 @@
 {
   "name": "@meddleware/nft-gate-gateway",
-  "version": "0.0.14",
+  "version": "0.0.15",
   "type": "module",
   "description": "Cloudflare Workers implementation of the nft-gate gateway: a wire-identical, drop-in sibling of the Rust gateway that gates any HTTP upstream behind an access_gate NFT.",
   "license": "0BSD",
@@ -20,6 +20,7 @@
   },
   "scripts": {
     "type-check": "tsc --noEmit",
+    "lint": "eslint .",
     "test": "vitest run --project unit",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project cloudflare-integration",
@@ -31,8 +32,8 @@
     "generate:vectors": "node scripts/gen-vectors.mjs > ../conformance/vectors.json"
   },
   "dependencies": {
-    "@meddleware/access-gate-client": "^0.0.1",
-    "@meddleware/nft-gate-client": "^0.0.13",
+    "@meddleware/access-gate-client": "^0.0.2",
+    "@meddleware/nft-gate-client": "^0.0.14",
     "@mysten/sui": "~2.33.1",
     "@noble/curves": "~2.4.0",
     "@noble/hashes": "~2.4.0"
@@ -40,7 +41,10 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "~0.22.0",
     "@cloudflare/workers-types": "~5.20260929.1",
+    "eslint": "^10.11.0",
+    "jiti": "^2.7.0",
     "typescript": "^6.0.0",
+    "typescript-eslint": "^8.71.0",
     "vitest": "~4.1.11",
     "wrangler": "^4.143.0"
   },

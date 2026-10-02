@@ -18,6 +18,11 @@ const message = new TextEncoder().encode(`nft-gate:access:${NONCE}`)
 function b64(bytes) {
   return Buffer.from(bytes).toString('base64')
 }
+/** base64 of the UTF-8 JSON — the client's encoding, which also covers non-ASCII fields. */
+function utf8Token(obj) {
+  return Buffer.from(JSON.stringify(obj), 'utf8').toString('base64')
+}
+
 function proofToken(address, nonce, signature) {
   return Buffer.from(JSON.stringify({ address, nonce, signature })).toString('base64')
 }
@@ -125,6 +130,15 @@ const out = {
   proofDecode: {
     token: proofToken('0x1', 'n', 's'),
     expect: { address: '0x1', nonce: 'n', signature: 's' },
+  },
+  proofDecodeRejects: {
+    description:
+      'Tokens every decoder must reject before verification: longer than 4096 characters (checked before base64/JSON parsing), or with a non-ASCII address, nonce or signature (the gateways issue ASCII-only nonces).',
+    cases: [
+      { name: 'oversized', token: 'A'.repeat(4097) },
+      { name: 'non-ASCII nonce', token: utf8Token({ address: '0x1', nonce: 'n\u00f6nce', signature: 's' }) },
+      { name: 'non-ASCII address', token: utf8Token({ address: '0x\u00e91', nonce: 'n', signature: 's' }) },
+    ],
   },
   addressNormalization: {
     description:

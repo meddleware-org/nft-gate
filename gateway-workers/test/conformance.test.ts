@@ -23,6 +23,12 @@ describe('conformance vectors (shared with the Rust gateway)', () => {
     expect(p.signature).toBe(vectors.proofDecode.expect.signature)
   })
 
+  for (const c of vectors.proofDecodeRejects.cases) {
+    it(`rejects a proof token: ${c.name} (matches Rust gateway)`, () => {
+      expect(() => decodeAccessProof(c.token)).toThrow()
+    })
+  }
+
   for (const c of vectors.addressNormalization.cases) {
     it(`normalizes address ${c.input} to canonical form (matches Rust gateway)`, () => {
       expect(normalizeAddress(c.input)).toBe(c.expected)

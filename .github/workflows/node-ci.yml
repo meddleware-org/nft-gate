@@ -39,6 +39,9 @@ jobs:
       - name: Type-check
         run: npm run type-check
 
+      - name: Lint
+        run: npm run lint
+
       # Both projects: unit (Node) and cloudflare-integration (workerd: router, state, body cap).
       - name: Test
         run: npm run test:all

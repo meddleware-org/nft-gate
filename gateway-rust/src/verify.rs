@@ -510,6 +510,15 @@ mod tests {
             pd["expect"]["signature"].as_str().unwrap()
         );
 
+        // proof decode rejections — oversize and non-ASCII fields fail in both gateways
+        for case in v["proofDecodeRejects"]["cases"].as_array().unwrap() {
+            assert!(
+                crate::proof::decode_access_proof(case["token"].as_str().unwrap()).is_err(),
+                "must reject: {}",
+                case["name"]
+            );
+        }
+
         // address normalization — the proof address is canonicalised before on-chain owner
         // comparison; both gateways must produce identical output for the same input.
         for case in v["addressNormalization"]["cases"].as_array().unwrap() {

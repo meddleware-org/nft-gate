@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.15] - 2026-10-02
+
+### Security
+
+- `decode_access_proof` matches the client and the Workers gateway: a token longer than 4096
+  characters is rejected before decoding, and a non-ASCII `address`, `nonce` or `signature` is
+  rejected. Both gateways assert the new shared `proofDecodeRejects` conformance vectors.
+
 ## [0.0.14] - 2026-10-02
 
 ### Changed
