@@ -45,9 +45,9 @@ export default defineConfig({
               bindings: {
                 UPSTREAM_URL: 'https://upstream.invalid',
                 SUI_RPC_URL: 'https://rpc.invalid',
-                // A `wrangler secret` in production; required by the config loader.
+                // A plain var in production (wrangler.toml); required by the config loader.
                 NFT_TYPE:
-                  '0x1a81ca177db039585e575beeeee4759466e55910e936a6733e38dbb65025eea4::access_gate::SoulboundAccessNFT',
+                  '0xa55789d77b8ae41e604c1c2e9ad9f7b034ca69b028ad0f1eee7d7cc8ad886d41::access_gate::SoulboundAccessNFT',
                 ALLOWED_ORIGINS: 'https://allowed.example.com,https://sui-walrus.meddleware.co.uk',
               },
             },

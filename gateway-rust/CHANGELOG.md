@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.14] - 2026-10-02
+
+### Changed
+
+- The live consume test (`live_consume_tx_valid`) targets the version-gated testnet `access_gate`
+  `0xa55789…6d41`, the hosted relay gate `0xfd6c3b2a…b8a6` and a consume on it. Operators of this
+  gateway set `NFT_TYPE` and `GATE_ID` for their own gate; passes of the superseded `0x1a81ca…`
+  package only match a gateway still configured for it.
+
 ## [0.0.13] - 2026-10-01
 
 Versions are aligned from this release: the crate, the npm package and the image share one version

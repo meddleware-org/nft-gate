@@ -41,11 +41,11 @@ SUI_RPC_URL = "https://fullnode.testnet.sui.io:443"
 
 # Required: the pass type this gateway accepts, `<access_gate original id>::access_gate::AccessNFT`
 # or `…::SoulboundAccessNFT`. A public on-chain type, so a plain var (it was a secret until 0.0.14).
-NFT_TYPE = "0x1a81ca177db039585e575beeeee4759466e55910e936a6733e38dbb65025eea4::access_gate::SoulboundAccessNFT"
+NFT_TYPE = "0xa55789d77b8ae41e604c1c2e9ad9f7b034ca69b028ad0f1eee7d7cc8ad886d41::access_gate::SoulboundAccessNFT"
 # Required: the gate whose passes are accepted — the testnet Walrus relay gate on access_gate
-# 0x1a81ca…. Change GATE_ID and NFT_TYPE only together with the apps' VITE_ACCESS_GATE_ID_TESTNET
+# 0xa55789… (version-gated, 2026-10-02). Change GATE_ID and NFT_TYPE only together with the apps' VITE_ACCESS_GATE_ID_TESTNET
 # (walrus-ui, dashboard, token-deployer-ui) — never one without the others.
-GATE_ID = "0xcb8206cab55902247daba61bad3d6c92f072425fe4034a98d6a22400d25a5f50"
+GATE_ID = "0xfd6c3b2a2baefcd8c3e08a2cddac942478e0527c421f4dc739917b01560ab8a6"
 SINGLE_USE = "true"
 PUBLIC_PATHS = "/v1/tip-config"
 RATE_LIMIT_PER_MIN = "30"

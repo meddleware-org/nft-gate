@@ -407,7 +407,7 @@ mod tests {
 
     // Live end-to-end check against Sui testnet — the Rust analogue of the Workers real-chain
     // harness. Ignored by default (network); run with `cargo test -- --ignored`. Uses a known
-    // `access_gate::consume` on the current testnet package/gate (0x1a81ca… / 0xcb8206…). Public
+    // `access_gate::consume` on the current testnet package/gate (0xa55789… / 0xfd6c3b…). Public
     // fullnodes prune old checkpoints: when this digest ages out (NOT_FOUND), replace it with a
     // recent one (`listEvents` on the AccessConsumedEvent type, descending).
     #[tokio::test]
@@ -421,11 +421,11 @@ mod tests {
             0,
             None,
         );
-        let pkg = "0x1a81ca177db039585e575beeeee4759466e55910e936a6733e38dbb65025eea4";
+        let pkg = "0xa55789d77b8ae41e604c1c2e9ad9f7b034ca69b028ad0f1eee7d7cc8ad886d41";
         let consumed = consumed_event_type(&format!("{pkg}::access_gate::SoulboundAccessNFT"));
-        let digest = "5dTcMMDnFgmZ3mSa1yJoEf9EtbPwpWDmgL5qmF6AiT9K";
+        let digest = "8br5PGrzidRpW6NJ5s4KHAar6j9ct3AkuMNeJh3TgUkP";
         let addr = "0xa991ae11b0785718cd3ad1c616e804a4c083f431b3144bb845bdec651164864a";
-        let gate = "0xcb8206cab55902247daba61bad3d6c92f072425fe4034a98d6a22400d25a5f50";
+        let gate = "0xfd6c3b2a2baefcd8c3e08a2cddac942478e0527c421f4dc739917b01560ab8a6";
         assert!(rpc
             .consume_tx_valid(digest, addr, &consumed, Some(gate))
             .await

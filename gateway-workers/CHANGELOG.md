@@ -2,10 +2,13 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
-## [Unreleased]
+## [0.0.14] - 2026-10-02
 
 ### Changed
 
+- Testnet: the relay gate is `0xfd6c3b2a…b8a6` on the version-gated `access_gate` `0xa55789…6d41`
+  (`NFT_TYPE` `0xa55789…::access_gate::SoulboundAccessNFT`). Passes from the superseded `0x1a81ca…`
+  package and gate `0xcb8206…` are no longer accepted.
 - `NFT_TYPE` is a `[vars]` entry in `wrangler.toml` instead of a Worker secret: it is a public on-chain
   type. The Deploy Workers workflow retires the old secret from a pending version first (a secret and a
   var may not share a name), so the switch has no downtime.
