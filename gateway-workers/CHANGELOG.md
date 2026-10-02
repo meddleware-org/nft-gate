@@ -2,6 +2,12 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [0.0.17] - 2026-10-02
+
+### Changed
+
+- No Worker changes: released with the Rust gateway 0.0.17 (one version for every artifact).
+
 ## [0.0.16] - 2026-10-02
 
 ### Changed

@@ -1,6 +1,6 @@
 [package]
 name = "nft-gate-gateway"
-version = "0.0.16"
+version = "0.0.17"
 edition = "2021"
 # The dependency graph's floor (checked in CI by the `msrv` job).
 rust-version = "1.88"
