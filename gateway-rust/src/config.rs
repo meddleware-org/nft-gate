@@ -16,7 +16,8 @@
 //! - `PUBLIC_PATHS` — comma-separated paths proxied without auth (default: `/v1/tip-config`).
 //! - `RATE_LIMIT_PER_MIN` — per-address request budget per minute, 0 to disable (default: `30`).
 //! - `CHALLENGE_RATE_LIMIT_PER_MIN` — per-IP budget for the challenge endpoint per minute, 0 to
-//!   disable (default: `30`). Keyed by `X-Forwarded-For` first entry / `X-Real-IP` / "unknown".
+//!   disable (default: `30`). Keyed by the client IP: the TCP peer, or the `X-Forwarded-For`
+//!   entry the outermost trusted proxy added (see `TRUSTED_PROXY_HOPS`).
 //! - `MAX_BODY_BYTES` — request body cap in bytes before proxying (default: `262144`).
 //! - `BIND_ADDR` — TCP listen address (default: `0.0.0.0:8080`).
 //! - `REDIS_URL` — Redis/Dragonfly URL for fleet-wide replay protection (default: unset →

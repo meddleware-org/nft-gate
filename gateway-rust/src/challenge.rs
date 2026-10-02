@@ -206,16 +206,27 @@ pub struct RedisNonceStore {
     prefix: String,
 }
 
+/// Time limit for a Redis connection attempt and for each command.
+const REDIS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl RedisNonceStore {
     /// Connect to a Redis-protocol server (Redis or Dragonfly). Startup-time async. Retries with
     /// exponential backoff (0.5 s doubling, 6 attempts, ~16 s in total) so a gateway that starts
     /// alongside its Redis does not crash-loop; gives up with the last error after that.
     pub async fn connect(url: &str, ttl_secs: u64) -> anyhow::Result<Self> {
         let client = redis::Client::open(url)?;
+        // Bound every command and reconnect: a store that accepts connections but stops answering
+        // must fail requests closed quickly, not hold them (and their concurrency slots) forever.
+        let config = redis::aio::ConnectionManagerConfig::new()
+            .set_connection_timeout(REDIS_TIMEOUT)
+            .set_response_timeout(REDIS_TIMEOUT);
         let mut delay = std::time::Duration::from_millis(500);
         let mut attempt = 1;
         let conn = loop {
-            match client.get_connection_manager().await {
+            match client
+                .get_connection_manager_with_config(config.clone())
+                .await
+            {
                 Ok(conn) => break conn,
                 Err(e) if attempt < 6 => {
                     tracing::warn!(error = %e, attempt, "redis connect failed; retrying");

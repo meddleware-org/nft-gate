@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Redis connection attempts and commands time out after 5 s (`ConnectionManagerConfig`), so a
+  store that accepts connections but stops answering fails requests closed instead of holding them.
+- The `CHALLENGE_RATE_LIMIT_PER_MIN` doc described the old `X-Forwarded-For`-first keying; it now
+  matches the code (TCP peer, or the hop added by the outermost trusted proxy).
+
 ## [0.0.16] - 2026-10-02
 
 ### Changed
