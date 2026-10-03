@@ -85,10 +85,11 @@ export class NonceRateState extends DurableObject {
   takeIfValid(nonce: string): boolean {
     const now = Date.now()
     const rows = this.sql.exec('SELECT expiry FROM nonces WHERE nonce = ?', nonce).toArray() as unknown as NonceRow[]
-    if (rows.length === 0) return false
+    const [row] = rows
+    if (!row) return false
     // Consume unconditionally (present ⇒ gone), so it can never be replayed.
     this.sql.exec('DELETE FROM nonces WHERE nonce = ?', nonce)
-    return Number(rows[0].expiry) > now
+    return Number(row.expiry) > now
   }
 
   /** Fixed 60s window per address. */
@@ -98,8 +99,8 @@ export class NonceRateState extends DurableObject {
     const rows = this.sql.exec('SELECT start, count FROM rate WHERE addr = ?', addr).toArray() as unknown as RateRow[]
     let start = now
     let count = 0
-    if (rows.length > 0) {
-      const r = rows[0]
+    const [r] = rows
+    if (r) {
       if (now - Number(r.start) < 60000) {
         start = Number(r.start)
         count = Number(r.count)
@@ -123,8 +124,8 @@ export class NonceRateState extends DurableObject {
     const rows = this.sql
       .exec('SELECT state, expiry FROM redemptions WHERE key = ?', key)
       .toArray() as unknown as RedemptionRow[]
-    if (rows.length > 0) {
-      const r = rows[0]
+    const [r] = rows
+    if (r) {
       if (r.state === 'committed') return 'redeemed'
       if (r.state === 'leased' && Number(r.expiry) > now) return 'leased'
       // else: an expired lease — fall through and re-lease.

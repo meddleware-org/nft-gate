@@ -79,6 +79,6 @@ export function randomHex24(): string {
   const buf = new Uint8Array(24)
   crypto.getRandomValues(buf)
   let out = ''
-  for (let i = 0; i < buf.length; i++) out += buf[i].toString(16).padStart(2, '0')
+  for (const b of buf) out += b.toString(16).padStart(2, '0')
   return out
 }

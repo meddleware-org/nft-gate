@@ -122,7 +122,7 @@ function extractProofToken(request: Request): string | undefined {
   const auth = request.headers.get('authorization')
   if (auth) {
     const m = auth.match(/^Bearer\s+(.+)$/i)
-    if (m) return m[1].trim()
+    if (m?.[1]) return m[1].trim()
   }
   const x = request.headers.get('x-access-proof')
   return x ? x.trim() : undefined

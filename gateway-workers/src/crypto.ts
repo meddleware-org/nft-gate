@@ -22,9 +22,7 @@ const HEX = '0123456789abcdef'
 /** Encode `bytes` as a lowercase hex string (no `0x` prefix). */
 export function bytesToHex(bytes: Uint8Array): string {
   let out = ''
-  for (let i = 0; i < bytes.length; i++) {
-    out += HEX[bytes[i] >> 4] + HEX[bytes[i] & 0x0f]
-  }
+  for (const b of bytes) out += HEX.charAt(b >> 4) + HEX.charAt(b & 0x0f)
   return out
 }
 
@@ -54,7 +52,7 @@ export function base64ToBytes(b64: string): Uint8Array {
 /** Encode `bytes` as standard base64. Uses `btoa` (present in the Workers runtime). */
 export function bytesToBase64(bytes: Uint8Array): string {
   let s = ''
-  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+  for (const b of bytes) s += String.fromCharCode(b)
   return btoa(s)
 }
 

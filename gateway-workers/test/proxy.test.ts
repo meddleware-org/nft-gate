@@ -98,8 +98,8 @@ describe('forward body limit', () => {
     const data = payload(CAP)
     const res = await forward(cfg, post(chunked(data, 300)))
     expect(res.status).toBe(200)
-    expect(seen[0].bytes).toEqual(data)
-    expect(seen[0].signal?.aborted).toBe(false)
+    expect(seen[0]?.bytes).toEqual(data)
+    expect(seen[0]?.signal?.aborted).toBe(false)
   })
 
   it('forwards an under-limit Content-Length body intact', async () => {
@@ -107,7 +107,7 @@ describe('forward body limit', () => {
     const data = payload(CAP - 1)
     const res = await forward(cfg, post(data, { 'content-length': String(data.byteLength) }))
     expect(res.status).toBe(200)
-    expect(seen[0].bytes).toEqual(data)
+    expect(seen[0]?.bytes).toEqual(data)
   })
 
   it('rejects a declared over-limit Content-Length with 413 before contacting the upstream', async () => {
