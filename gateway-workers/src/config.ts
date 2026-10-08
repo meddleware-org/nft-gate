@@ -10,8 +10,6 @@
  * and `UPSTREAM_AUTH_HEADERS` are shared with the Rust gateway in the same formats.
  */
 
-import { gatewayOrigin as gatewayOriginOf } from '@meddleware/nft-gate-client'
-
 export interface Env {
   // ── config (parity with the Rust gateway) ─────────────────────────────────
   UPSTREAM_URL: string
@@ -144,6 +142,19 @@ function req(env: Env, key: keyof Env): string {
     throw new Error(`${key} is required`)
   }
   return v
+}
+
+/**
+ * The canonical origin of an https URL (`new URL(...).origin`), refusing credentials and non-https.
+ * Kept free of imports so scripts can load this module under plain Node (no type stripping inside
+ * node_modules).
+ */
+function canonicalHttpsOrigin(v: string): string {
+  const url = new URL(v)
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) throw new Error('not https')
+  if (url.username || url.password) throw new Error('credentials')
+  return url.origin
 }
 
 /** An integer env var in `[min, max]`; anything else (a typo, a negative, a fraction) fails startup. */
@@ -289,7 +300,7 @@ export function loadConfig(env: Env): Config {
 
   let gatewayOrigin: string
   try {
-    gatewayOrigin = gatewayOriginOf(req(env, 'GATEWAY_ORIGIN').trim())
+    gatewayOrigin = canonicalHttpsOrigin(req(env, 'GATEWAY_ORIGIN').trim())
   } catch {
     throw new Error('GATEWAY_ORIGIN must be a canonical https origin (https://host, no path)')
   }

@@ -2,6 +2,12 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [0.0.21] - 2026-10-08
+
+### Fixed
+
+- `src/config.ts` has no imports again, so `scripts/check-upstream-auth.mjs` (the deploy workflow's pre-check) loads it under plain Node; 0.0.19 broke that check. A test guards it.
+
 ## [0.0.20] - 2026-10-08
 
 ### Changed

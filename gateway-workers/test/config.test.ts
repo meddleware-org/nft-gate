@@ -187,3 +187,11 @@ describe('loadConfig — CHALLENGE_RATE_LIMIT_PER_MIN', () => {
     expect(loadConfig({ ...baseEnv, CHALLENGE_RATE_LIMIT_PER_MIN: '0' }).challengeRateLimitPerMin).toBe(0)
   })
 })
+
+describe('config.ts stays loadable by plain Node scripts', () => {
+  it('has no imports (scripts/check-upstream-auth.mjs imports it with type stripping, which node_modules packages do not support)', async () => {
+    // @ts-expect-error vite's `?raw` import: the module's own source text
+    const source = (await import('../src/config.ts?raw')).default as string
+    expect(source).not.toMatch(/^import\s/m)
+  })
+})
