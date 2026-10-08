@@ -36,7 +36,7 @@ blake2 = "0.10"
 # ZIP-215 ed25519 verification — the rule Sui validators apply (pinned by conformance `zip215`).
 ed25519-consensus = "2"
 # secp256k1 / secp256r1 personal-message signature verification (Sui flags 0x01 / 0x02).
-k256 = { version = "0.13", features = ["ecdsa"] }
+k256 = { version = "0.14", features = ["ecdsa"] }
 p256 = { version = "0.13", features = ["ecdsa"] }
 # OsRng for nonce generation — much lighter than the full rand crate (no algorithms needed).
 rand_core = { version = "0.6", features = ["getrandom"] }
