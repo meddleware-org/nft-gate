@@ -28,8 +28,12 @@
 
 name = "nft-gate-gateway"
 main = "src/index.ts"
-compatibility_date = "2025-04-01"
+compatibility_date = "2026-06-01"
 compatibility_flags = ["nodejs_compat"]
+# Serve only on the route below: no *.workers.dev or preview URL that would bypass the hostname-level
+# edge rules (WAF, rate limits) on the zone.
+workers_dev = false
+preview_urls = false
 
 # ── config (parity with the Rust gateway env; see README.md for the mapping) ─────────────────
 [vars]
@@ -38,6 +42,10 @@ compatibility_flags = ["nodejs_compat"]
 
 # Public fullnode — safe to keep as a plain var (no sensitive information).
 SUI_RPC_URL = "https://fullnode.testnet.sui.io:443"
+NETWORK = "testnet"
+# The public origin of THIS gateway, signed into every access proof (nft-gate:access:v2): a proof made
+# for another gateway, gate or network is useless here. Must equal the route's hostname below.
+GATEWAY_ORIGIN = "https://sui-walrus-relay-testnet.meddleware.co.uk"
 
 # Required: the pass type this gateway accepts, `<access_gate original id>::access_gate::AccessNFT`
 # or `…::SoulboundAccessNFT`. A public on-chain type, so a plain var (it was a secret until 0.0.14).
@@ -56,15 +64,23 @@ CHALLENGE_RATE_LIMIT_PER_MIN = "30"
 PUBLIC_RATE_LIMIT_PER_MIN = "120"
 PUBLIC_CACHE_TTL_SECS = "60"
 MAX_BODY_BYTES = "104857600"
+# Total deadline for one upstream exchange (body in, response out). The redemption lease below must
+# outlive it (checked at startup), so a lease cannot lapse mid-upload.
+UPSTREAM_TIMEOUT_SECS = "600"
+RPC_TIMEOUT_SECS = "15"
+# Per-client-IP budget for gated requests, checked before signature verification.
+GATED_PREAUTH_RATE_LIMIT_PER_MIN = "120"
 CHALLENGE_TTL_SECS = "300"
 OWNERSHIP_CACHE_TTL_MS = "0"
 # Single-use redemption: the permanent on-chain consumeDigest is the one-time token. A use is only
 # spent when an upload actually succeeds (commit); an interrupted upload releases the lease so the
-# consume stays redeemable (the use is never lost). LEASE_TTL bounds an in-flight upload; RETENTION
-# is how long a spent consume is remembered to block re-redemption (30d; a consume older than this
-# could be re-redeemed — an obscure, low-value edge).
-REDEMPTION_LEASE_TTL_SECS = "120"
+# consume stays redeemable (the use is never lost). LEASE_TTL bounds an in-flight upload and must
+# exceed UPSTREAM_TIMEOUT_SECS; RETENTION is how long a spent consume is remembered. A consume older
+# than CONSUME_MAX_AGE_SECS is refused, so no consume can outlive its redemption record (5 days is
+# inside the ~5.5-day transaction retention of public testnet fullnodes).
+REDEMPTION_LEASE_TTL_SECS = "900"
 REDEMPTION_RETENTION_SECS = "2592000"
+CONSUME_MAX_AGE_SECS = "432000"
 # Workers-specific:
 NONCE_BACKEND = "durable-object" # "durable-object" (default) | "kv"
 NONCE_SHARD = "region"           # "region" (default) | "global"

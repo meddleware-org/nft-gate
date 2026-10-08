@@ -23,10 +23,20 @@ type Connector = HttpsConnector<HttpConnector>;
 
 /// TCP connect timeout for every outbound call.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// Whole-request timeout for Sui RPC calls.
-pub const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 /// Cap on a gRPC-web response body (the gateway reads small messages only).
 pub const MAX_RPC_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+/// The upstream (or RPC) did not finish within its deadline; the proxy answers 504 for it.
+#[derive(Debug)]
+pub struct TimedOut;
+
+impl std::fmt::Display for TimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("request timed out")
+    }
+}
+
+impl std::error::Error for TimedOut {}
 
 /// Response from a proxied upstream request.
 pub struct ProxyResponse {
@@ -91,9 +101,13 @@ impl HttpClient {
                 .to_bytes();
             Ok::<_, anyhow::Error>((status, headers, body))
         };
-        tokio::time::timeout(timeout, fut)
-            .await
-            .map_err(|_| anyhow::anyhow!("{what} request timed out after {}s", timeout.as_secs()))?
+        match tokio::time::timeout(timeout, fut).await {
+            Ok(r) => r,
+            Err(_) => {
+                tracing::warn!(what, secs = timeout.as_secs(), "request timed out");
+                Err(anyhow::Error::new(TimedOut))
+            }
+        }
     }
 
     /// POST an already gRPC-web-framed `body` to `url` with the `application/grpc-web+proto`
@@ -104,6 +118,7 @@ impl HttpClient {
         url: &str,
         body: Bytes,
         auth: Option<&AuthHeader>,
+        timeout: Duration,
     ) -> anyhow::Result<(HeaderMap, Bytes)> {
         let mut req = Request::builder()
             .method(Method::POST)
@@ -116,7 +131,7 @@ impl HttpClient {
             insert_auth(req.headers_mut(), h)?;
         }
         let (status, headers, bytes) = self
-            .send(req, RPC_TIMEOUT, MAX_RPC_RESPONSE_BYTES, "gRPC-web")
+            .send(req, timeout, MAX_RPC_RESPONSE_BYTES, "gRPC-web")
             .await?;
         if !status.is_success() {
             anyhow::bail!("gRPC-web HTTP {status}");

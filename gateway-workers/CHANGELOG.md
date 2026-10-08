@@ -2,6 +2,42 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [0.0.19] - 2026-10-08
+
+### Changed (breaking: protocol v2, configuration)
+
+- **Audience-bound access proofs.** The signed message is now `nft-gate:access:v2` and binds this
+  gateway's origin, the gate id, the network, the nonce and (single-use) the consume digest; the
+  Worker rebuilds it from `GATEWAY_ORIGIN`, `GATE_ID` and `NETWORK`. v1 proofs are refused. New
+  required vars: `GATEWAY_ORIGIN`, `NETWORK`.
+- **Owner-bound redemption.** A lease returns a random token and commit/release are compare-and-set
+  on it, so a lapsed request cannot clear or overwrite a newer holder's lease. A commit whose lease
+  was lost is `502`. `REDEMPTION_LEASE_TTL_SECS` defaults to 900 and must exceed the new
+  `UPSTREAM_TIMEOUT_SECS` (600, a total deadline, `504` past it); both are checked at startup.
+- **Single-use needs the Durable Object.** `SINGLE_USE=true` with `NONCE_BACKEND=kv` is refused, the
+  quota-degrade flag is ignored in that mode, and redemptions are no longer implemented on KV.
+- A consume older than `CONSUME_MAX_AGE_SECS` (5 days) is refused, so it cannot outlive its
+  redemption record. A digest the node does not know is `403`; only "not found" is retried, and a
+  malformed digest never reaches the RPC.
+- **Ownership mode counts usable passes only** (unlimited, or single-use with uses left;
+  `@meddleware/access-gate-client` 0.0.5). An unrecognised `Gate` JSON denies (`502`) instead of
+  reading as "not paused". Every Sui RPC read has a deadline (`RPC_TIMEOUT_SECS`).
+- **Strict configuration.** Booleans must be `true`/`false`, numbers integers within bounds, origins
+  canonical, `PUBLIC_PATHS` plain paths, `SUI_RPC_AUTH_HEADER` `Name: value`, URLs https. A bad value
+  is a startup error, never a weaker mode. `ALLOWED_ORIGINS` defaults to none (`wrangler.toml` keeps
+  Meddleware's origins).
+- **Proxy hygiene.** Upstream redirects are never followed (`302` is `502`); hop-by-hop fields (and
+  those named in `Connection`), cookies, forwarding fields and client `cf-access-*` headers are
+  stripped from the request, and hop-by-hop fields, cookies and every upstream CORS field from the
+  response; only `GET`/`HEAD`/`POST`/`PUT` are forwarded (`405`), public paths are `GET`/`HEAD` only,
+  unsafe paths are `400`.
+- Gated requests are rate-limited per client IP before signature verification
+  (`GATED_PREAUTH_RATE_LIMIT_PER_MIN`); IPv6 clients are keyed by /64; the rate table is swept; the
+  ownership cache is bounded.
+- `wrangler.toml`: `compatibility_date` 2026-06-01, `workers_dev` and `preview_urls` off.
+- The conformance vectors are published by `@meddleware/nft-gate-client` 0.0.16
+  (`scripts/sync-vectors.mjs`); `scripts/gen-vectors.mjs` is gone.
+
 ## [0.0.18] - 2026-10-08
 
 ### Changed

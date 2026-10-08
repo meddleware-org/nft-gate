@@ -172,6 +172,8 @@ The Rust gateway enforces the same cap with the same status codes (see
 | Var | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream (set via `wrangler secret put`) |
+| `GATEWAY_ORIGIN` | ✓ | — | This gateway's canonical public origin (`https://host`, no path, lower-case); signed into every proof (`nft-gate:access:v2`), so a proof made for another gateway is useless here (`wrangler.toml` `[vars]`) |
+| `NETWORK` | ✓ | — | `localnet` \| `devnet` \| `testnet` \| `mainnet`; signed into every proof, and labels the RPC client |
 | `SUI_RPC_URL` | ✓ | `https://fullnode.testnet.sui.io:443` | Sui fullnode (queried over gRPC-web); change to mainnet for production |
 | `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` or `SoulboundAccessNFT`, with `<pkg>` the access_gate original id (a `[vars]` entry in `wrangler.toml`); any other type — e.g. a fungible `Coin<T>` — is rejected at startup |
 | `GATE_ID` | ✓ | — | The gate whose passes are accepted; also read live so a paused gate with `pause_blocks_access` denies holders (`403 the gate is paused`) |
@@ -187,7 +189,18 @@ The Rust gateway enforces the same cap with the same status codes (see
 | `UPSTREAM_AUTH_HEADERS` | | — | JSON array `[{"name":…,"value":…}]` of headers injected on every upstream request (secret); invalid JSON fails closed |
 | `CHALLENGE_RATE_LIMIT_PER_MIN` | | `30` | Per-client-IP budget for `GET /v1/challenge` (0 disables) |
 | `SUI_RPC_AUTH_HEADER` | | — | `Name: value` header added to Sui RPC calls (secret, for authenticated nodes) |
-| `QUOTA_GUARD_ENABLED` | | `false` | Enable the scheduled free-tier quota guard |
+| `QUOTA_GUARD_ENABLED` | | `false` | Enable the scheduled free-tier quota guard (never moves single-use redemptions off the Durable Object) |
+| `ALLOWED_ORIGINS` | | none | Comma-separated canonical browser origins granted CORS (`wrangler.toml` lists Meddleware's apps; an unset value grants none) |
+| `UPSTREAM_TIMEOUT_SECS` | | `600` | Total deadline for one upstream exchange (request body and response); `504` past it |
+| `RPC_TIMEOUT_SECS` | | `15` | Deadline for each Sui RPC read |
+| `GATED_PREAUTH_RATE_LIMIT_PER_MIN` | | `120` | Per-client-IP budget for gated requests, checked **before** signature verification (`0` disables) |
+| `REDEMPTION_LEASE_TTL_SECS` | | `900` | Single-use lease; must exceed `UPSTREAM_TIMEOUT_SECS` (checked at startup) |
+| `REDEMPTION_RETENTION_SECS` | | `2592000` | How long a spent consume is remembered |
+| `CONSUME_MAX_AGE_SECS` | | `432000` | Oldest accepted consume (5 days, inside public fullnodes' transaction retention); at most the retention |
+
+Every value is validated at startup: a boolean must be exactly `true`/`false`, numbers are integers
+within bounds, origins must be canonical, and `SINGLE_USE=true` is refused with `NONCE_BACKEND=kv`
+(KV's lease is not atomic). A bad value is a `500 gateway misconfigured`, never a weaker mode.
 
 Vars listed in `wrangler.toml` are overwritten on every `wrangler deploy`. Values that must
 survive deployments (credentials, contract addresses) must be set with `wrangler secret put`.

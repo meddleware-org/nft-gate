@@ -14,21 +14,30 @@ import {
   FLAG_ZKLOGIN,
   type ChainQuery,
 } from '../src/verify.js'
-import { personalMessageForNonce } from '../src/wire.js'
+import { personalMessage } from '../src/wire.js'
 import { bytesToBase64, concatBytes } from '../src/crypto.js'
 import type { Config } from '../src/config.js'
 import type { NonceBackend } from '../src/state/types.js'
+
+const DIGEST = '5Wq9tE4gXz8hEvFhYt8KkTJb2Pp6qXqj8cRk3xN1mYdL'
+const ORIGIN = 'https://gateway.example.com'
+const GATE = '0x' + '0'.repeat(63) + '2'
+
+/** The message a client signs for this gateway (audience: ORIGIN, gate 0x2, testnet). */
+function msgFor(nonce: string, consumeDigest?: string): Uint8Array {
+  return personalMessage({ origin: ORIGIN, gateId: GATE, network: 'testnet', nonce, consumeDigest })
+}
 
 // ── helpers to build real signed proof tokens (mirrors verify.rs test helpers) ──────────────
 function tokenB64(obj: Record<string, unknown>): string {
   return bytesToBase64(new TextEncoder().encode(JSON.stringify(obj)))
 }
 
-function ed25519Token(seed: number, nonce: string, consumeDigest?: string) {
+function ed25519Token(seed: number, nonce: string, consumeDigest?: string, signedMessage?: Uint8Array) {
   const priv = new Uint8Array(32).fill(seed)
   const pub = ed25519.getPublicKey(priv)
   const address = deriveAddress(FLAG_ED25519, pub)
-  const sig = ed25519.sign(signingDigest(personalMessageForNonce(nonce)), priv)
+  const sig = ed25519.sign(signingDigest(signedMessage ?? msgFor(nonce, consumeDigest)), priv)
   const signature = bytesToBase64(concatBytes(Uint8Array.of(FLAG_ED25519), sig, pub))
   const obj: Record<string, unknown> = { address, nonce, signature }
   if (consumeDigest) obj.consumeDigest = consumeDigest
@@ -38,7 +47,6 @@ function ed25519Token(seed: number, nonce: string, consumeDigest?: string) {
 // ── FakeBackend + MockChain (mirror the Rust in-memory store + MockChain) ────────────────────
 class FakeBackend implements NonceBackend {
   private nonces = new Map<string, { expiry: number; used: boolean }>()
-  private redemptions = new Map<string, { state: 'leased' | 'committed'; expiry: number }>()
   constructor(private ttlSecs = 300) {}
   issueSpecific(nonce: string) {
     this.nonces.set(nonce, { expiry: Date.now() + this.ttlSecs * 1000, used: false })
@@ -59,22 +67,6 @@ class FakeBackend implements NonceBackend {
   async rateCheck() {
     return true
   }
-  async tryLeaseRedemption(key: string, leaseTtlSecs: number): Promise<'ok' | 'leased' | 'redeemed'> {
-    const r = this.redemptions.get(key)
-    const now = Date.now()
-    if (r) {
-      if (r.state === 'committed') return 'redeemed'
-      if (r.state === 'leased' && r.expiry > now) return 'leased'
-    }
-    this.redemptions.set(key, { state: 'leased', expiry: now + leaseTtlSecs * 1000 })
-    return 'ok'
-  }
-  async commitRedemption(key: string, retentionSecs: number) {
-    this.redemptions.set(key, { state: 'committed', expiry: Date.now() + retentionSecs * 1000 })
-  }
-  async releaseRedemption(key: string) {
-    if (this.redemptions.get(key)?.state === 'leased') this.redemptions.delete(key)
-  }
 }
 
 class MockChain implements ChainQuery {
@@ -88,8 +80,12 @@ class MockChain implements ChainQuery {
   }
   /** The event type the verifier asked for (asserted by the exact-type test). */
   lastConsumedEventType: string | undefined
-  async consumeTxValid(_digest: string, _address: string, consumedEventType: string) {
+  lastMaxAgeSecs: number | undefined
+  consumeCalls = 0
+  async consumeTxValid(_digest: string, _address: string, consumedEventType: string, _gate: string | undefined, maxAgeSecs: number) {
+    this.consumeCalls++
     this.lastConsumedEventType = consumedEventType
+    this.lastMaxAgeSecs = maxAgeSecs
     return this.consumed
   }
   async gateAccessBlocked() {
@@ -101,6 +97,8 @@ function cfg(singleUse: boolean): Config {
   return {
     upstreamUrl: 'http://upstream',
     suiRpcUrl: 'http://rpc',
+    gatewayOrigin: ORIGIN,
+    network: 'testnet',
     nftType: '0x1::access_gate::AccessNFT',
     gateId: '0x2',
     challengeTtlSecs: 300,
@@ -111,8 +109,12 @@ function cfg(singleUse: boolean): Config {
     publicRateLimitPerMin: 120,
     publicCacheTtlSecs: 60,
     maxBodyBytes: 262144,
+    upstreamTimeoutMs: 600_000,
+    rpcTimeoutMs: 15_000,
+    gatedPreauthRateLimitPerMin: 120,
+    consumeMaxAgeSecs: 432000,
     ownershipCacheTtlMs: 0,
-    redemptionLeaseTtlSecs: 120,
+    redemptionLeaseTtlSecs: 900,
     redemptionRetentionSecs: 2592000,
     nonceBackend: 'durable-object',
     nonceShard: 'global',
@@ -126,10 +128,10 @@ function cfg(singleUse: boolean): Config {
 describe('signature verification (all schemes)', () => {
   it('ed25519 verifies and recovers the address', () => {
     const { address, signature } = ed25519Token(7, 'nonce-1')
-    const msg = personalMessageForNonce('nonce-1')
+    const msg = msgFor('nonce-1')
     expect(verifyPersonalMessageSignature(address, msg, signature)).toBe(true)
     expect(verifyPersonalMessageSignature('0xdead', msg, signature)).toBe(false) // wrong addr
-    const other = personalMessageForNonce('nonce-2')
+    const other = msgFor('nonce-2')
     expect(verifyPersonalMessageSignature(address, other, signature)).toBe(false) // tampered
   })
 
@@ -137,7 +139,7 @@ describe('signature verification (all schemes)', () => {
     const priv = new Uint8Array(32).fill(9)
     const pub = secp256k1.getPublicKey(priv, true) // 33-byte compressed
     const address = deriveAddress(FLAG_SECP256K1, pub)
-    const msg = personalMessageForNonce('k1-nonce')
+    const msg = msgFor('k1-nonce')
     // noble v2: sign() returns compact Uint8Array directly (no .toCompactRawBytes())
     const sig = secp256k1.sign(signingDigest(msg), priv, { lowS: true })
     const signature = bytesToBase64(concatBytes(Uint8Array.of(FLAG_SECP256K1), sig, pub))
@@ -149,7 +151,7 @@ describe('signature verification (all schemes)', () => {
     const priv = new Uint8Array(32).fill(11)
     const pub = p256.getPublicKey(priv, true)
     const address = deriveAddress(FLAG_SECP256R1, pub)
-    const msg = personalMessageForNonce('r1-nonce')
+    const msg = msgFor('r1-nonce')
     // noble v2: sign() returns compact Uint8Array directly (no .toCompactRawBytes())
     const sig = p256.sign(signingDigest(msg), priv, { lowS: true })
     const signature = bytesToBase64(concatBytes(Uint8Array.of(FLAG_SECP256R1), sig, pub))
@@ -158,17 +160,11 @@ describe('signature verification (all schemes)', () => {
   })
 
   it('multisig and zkLogin flags fail closed', () => {
-    const msg = personalMessageForNonce('n')
+    const msg = msgFor('n')
     const ms = bytesToBase64(concatBytes(Uint8Array.of(FLAG_MULTISIG), new Uint8Array(96)))
     const zk = bytesToBase64(concatBytes(Uint8Array.of(FLAG_ZKLOGIN), new Uint8Array(96)))
     expect(verifyPersonalMessageSignature('0x1', msg, ms)).toBe(false)
     expect(verifyPersonalMessageSignature('0x1', msg, zk)).toBe(false)
-  })
-
-  it('golden personal-message bytes are stable', () => {
-    expect(new TextDecoder().decode(personalMessageForNonce('GOLDEN-NONCE-123'))).toBe(
-      'nft-gate:access:GOLDEN-NONCE-123',
-    )
   })
 })
 
@@ -217,17 +213,19 @@ describe('verifyAccessRequest decision', () => {
   it('single-use requires a valid consume and returns the redemptionKey', async () => {
     const store = new FakeBackend()
     store.issueSpecific('n5')
-    const b5 = ed25519Token(7, 'n5', '0xdigest')
+    const b5 = ed25519Token(7, 'n5', DIGEST)
     const denied = await verifyAccessRequest(cfg(true), store, b5.token, new MockChain(true, false))
     expect(denied).toEqual({ ok: false, denied: 'ConsumeMissing' })
+    // The consume age bound is the configured one.
 
     store.issueSpecific('n6')
-    const b6 = ed25519Token(7, 'n6', '0xdigest')
+    const b6 = ed25519Token(7, 'n6', DIGEST)
     const chain = new MockChain(false, true)
     const ok = await verifyAccessRequest(cfg(true), store, b6.token, chain)
     // The digest is returned so the dispatcher can lease/commit it (single-use redemption).
-    expect(ok).toEqual({ ok: true, address: b6.address, redemptionKey: '0xdigest' })
+    expect(ok).toEqual({ ok: true, address: b6.address, redemptionKey: DIGEST })
     // The chain is asked for the configured package's exact event type, never a suffix.
+    expect(chain.lastMaxAgeSecs).toBe(432000)
     expect(chain.lastConsumedEventType).toBe(
       '0x0000000000000000000000000000000000000000000000000000000000000001::access_gate::AccessConsumedEvent',
     )
@@ -252,7 +250,7 @@ describe('verifyAccessRequest decision', () => {
   it('single-use: a paused gate denies before the consume is redeemed', async () => {
     const store = new FakeBackend()
     store.issueSpecific('p2')
-    const b = ed25519Token(7, 'p2', '0xdigest')
+    const b = ed25519Token(7, 'p2', DIGEST)
     const res = await verifyAccessRequest(cfg(true), store, b.token, new MockChain(true, true, true))
     // No redemptionKey is returned, so the dispatcher never leases the consume: it stays redeemable.
     expect(res).toEqual({ ok: false, denied: 'GatePaused' })
@@ -268,5 +266,55 @@ describe('verifyAccessRequest decision', () => {
     }
     const res = await verifyAccessRequest(cfg(false), store, b.token, chain)
     expect(res).toEqual({ ok: false, denied: 'ChainError' })
+  })
+})
+
+describe('audience binding (protocol v2)', () => {
+  async function decide(configure: (c: Config) => Config, tokenOf: () => string, singleUse = false) {
+    const store = new FakeBackend()
+    store.issueSpecific('aud-nonce')
+    const chain = new MockChain(true, true)
+    const res = await verifyAccessRequest(configure(cfg(singleUse)), store, tokenOf(), chain)
+    return { res, chain }
+  }
+
+  it('accepts a proof signed for exactly this gateway, gate and network', async () => {
+    const { res } = await decide((c) => c, () => ed25519Token(7, 'aud-nonce').token)
+    expect(res.ok).toBe(true)
+  })
+
+  it.each([
+    ['another gateway origin', (c: Config) => ({ ...c, gatewayOrigin: 'https://other.example.com' })],
+    ['another gate', (c: Config) => ({ ...c, gateId: '0x3' })],
+    ['another network', (c: Config) => ({ ...c, network: 'mainnet' as const })],
+  ])('refuses a proof made for %s', async (_name, configure) => {
+    const { res } = await decide(configure, () => ed25519Token(7, 'aud-nonce').token)
+    expect(res).toEqual({ ok: false, denied: 'BadSignature' })
+  })
+
+  it('refuses the v1 message (no audience) outright', async () => {
+    const v1 = new TextEncoder().encode('nft-gate:access:aud-nonce')
+    const { res } = await decide((c) => c, () => ed25519Token(7, 'aud-nonce', undefined, v1).token)
+    expect(res).toEqual({ ok: false, denied: 'BadSignature' })
+  })
+
+  it('an ownership gateway refuses a proof signed for single-use (consume line in the message)', async () => {
+    const { res } = await decide((c) => c, () => ed25519Token(7, 'aud-nonce', DIGEST).token)
+    expect(res).toEqual({ ok: false, denied: 'BadSignature' })
+  })
+
+  it('a single-use gateway refuses a swapped consume digest (it is signed)', async () => {
+    const signedForOther = ed25519Token(7, 'aud-nonce', DIGEST)
+    const swapped = JSON.parse(atob(signedForOther.token)) as Record<string, unknown>
+    swapped.consumeDigest = '9' + DIGEST.slice(1)
+    const { res, chain } = await decide((c) => c, () => tokenB64(swapped), true)
+    expect(res).toEqual({ ok: false, denied: 'BadSignature' })
+    expect(chain.consumeCalls).toBe(0)
+  })
+
+  it('a malformed digest never reaches the chain, and a missing one is not even verified', async () => {
+    const { res, chain } = await decide((c) => c, () => tokenB64({ address: '0x1', nonce: 'aud-nonce', signature: 'AAAA', consumeDigest: 'DIGEST-1' }), true)
+    expect(res).toEqual({ ok: false, denied: 'BadProof' })
+    expect(chain.consumeCalls).toBe(0)
   })
 })

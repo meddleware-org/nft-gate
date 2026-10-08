@@ -3,7 +3,7 @@ import { env } from 'cloudflare:test'
 import { DurableObjectBackend } from '../src/state/durable_object.js'
 import { KvBackend } from '../src/state/kv.js'
 import type { NonceRateState } from '../src/state/durable_object.js'
-import type { NonceBackend } from '../src/state/types.js'
+import type { NonceBackend, RedemptionStore } from '../src/state/types.js'
 import { shardOfNonce } from '../src/state/types.js'
 
 interface TestEnv {
@@ -12,7 +12,7 @@ interface TestEnv {
 }
 const e = env as unknown as TestEnv
 
-function doBackend(max = 10_000): NonceBackend {
+function doBackend(max = 10_000): DurableObjectBackend {
   return new DurableObjectBackend(e.NONCE_STATE, 'global', max)
 }
 function kvBackend(): NonceBackend {
@@ -43,44 +43,68 @@ describe.each([
   })
 })
 
-// Single-use redemption: the consumeDigest is the one-time token. Same semantics on both backends.
-describe.each([
-  ['durable-object', () => doBackend()],
-  ['kv', () => kvBackend()],
-])('redemption backend: %s', (_name, make) => {
+// Single-use redemption: the consumeDigest is the one-time token. Durable Object only: the KV
+// backend no longer implements redemptions (SINGLE_USE=true is refused with it).
+describe('redemption store: durable-object', () => {
+  const store = (): RedemptionStore => doBackend()
   const key = () => '0xdigest' + Math.random().toString(16).slice(2)
+  const lease = async (s: RedemptionStore, k: string, ttl = 120) => {
+    const r = await s.tryLeaseRedemption(k, ttl)
+    if (r.status !== 'ok') throw new Error(`expected a lease, got ${r.status}`)
+    return r.token
+  }
 
   it('leases once; a concurrent lease is rejected; commit marks it redeemed', async () => {
-    const store = make()
+    const s = store()
     const k = key()
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok') // first claim
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('leased') // in-flight duplicate
-    await store.commitRedemption(k, 3600)
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('redeemed') // spent — never reusable
+    const token = await lease(s, k)
+    expect((await s.tryLeaseRedemption(k, 120)).status).toBe('leased') // in-flight duplicate
+    expect(await s.commitRedemption(k, token, 3600)).toBe('ok')
+    expect((await s.tryLeaseRedemption(k, 120)).status).toBe('redeemed') // spent: never reusable
   })
 
   it('release makes an interrupted consume immediately re-leasable (use not lost)', async () => {
-    const store = make()
+    const s = store()
     const k = key()
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok')
-    await store.releaseRedemption(k) // upload failed
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok') // retry with the same consume
+    await s.releaseRedemption(k, await lease(s, k)) // upload failed
+    expect((await s.tryLeaseRedemption(k, 120)).status).toBe('ok')
   })
 
   it('release never clears a committed redemption', async () => {
-    const store = make()
+    const s = store()
     const k = key()
-    await store.tryLeaseRedemption(k, 120)
-    await store.commitRedemption(k, 3600)
-    await store.releaseRedemption(k) // must be a no-op on a committed key
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('redeemed')
+    const token = await lease(s, k)
+    await s.commitRedemption(k, token, 3600)
+    await s.releaseRedemption(k, token) // must be a no-op on a committed key
+    expect((await s.tryLeaseRedemption(k, 120)).status).toBe('redeemed')
   })
 
   it('an expired lease is reclaimable (crashed in-flight upload)', async () => {
-    const store = make()
+    const s = store()
     const k = key()
-    expect(await store.tryLeaseRedemption(k, 0)).toBe('ok') // lease expires immediately
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok') // reclaimed, not stuck 'leased'
+    await lease(s, k, 0) // lease expires immediately
+    expect((await s.tryLeaseRedemption(k, 120)).status).toBe('ok')
+  })
+
+  it('a stale holder can neither release nor commit over a newer lease', async () => {
+    const s = store()
+    const k = key()
+    const stale = await lease(s, k, 0) // lapses at once
+    const fresh = await lease(s, k, 120) // a newer holder
+    expect(stale).not.toBe(fresh)
+    await s.releaseRedemption(k, stale) // must not clear the newer lease
+    expect((await s.tryLeaseRedemption(k, 120)).status).toBe('leased')
+    expect(await s.commitRedemption(k, stale, 3600)).toBe('lost') // and must not commit over it
+    expect((await s.tryLeaseRedemption(k, 120)).status).toBe('leased')
+    expect(await s.commitRedemption(k, fresh, 3600)).toBe('ok')
+    expect((await s.tryLeaseRedemption(k, 120)).status).toBe('redeemed')
+  })
+
+  it('a commit after the lease lapsed is lost, never recorded', async () => {
+    const s = store()
+    const k = key()
+    const token = await lease(s, k, 0)
+    expect(await s.commitRedemption(k, token, 3600)).toBe('lost')
   })
 })
 
@@ -99,6 +123,13 @@ describe('durable-object rate limiter', () => {
   it('rate limit of 0 disables', async () => {
     const store = doBackend()
     for (let i = 0; i < 50; i++) expect(await store.rateCheck('0xzero', 0, 'g')).toBe(true)
+  })
+
+  it('rate windows older than a minute are swept (the table is bounded by recent keys)', async () => {
+    const store = doBackend()
+    // Many one-off keys; the sweep is probabilistic, so just require that heavy use keeps working.
+    for (let i = 0; i < 200; i++) await store.rateCheck(`0xk${i}-${Math.random()}`, 5, 'g')
+    expect(await store.rateCheck('0xafter', 5, 'g')).toBe(true)
   })
 
   it('hard cap keeps the nonce store bounded', async () => {

@@ -321,26 +321,49 @@ pub fn unframe(headers: &HeaderMap, body: &[u8]) -> anyhow::Result<Vec<u8>> {
     }
     match grpc_status {
         Some(0) => Ok(msg),
-        Some(code) => anyhow::bail!("gRPC status {code}"),
+        Some(code) => Err(anyhow::Error::new(GrpcStatus(code))),
         None => anyhow::bail!("gRPC-web response carries no grpc-status"),
     }
 }
+
+/// A non-zero gRPC status from the node, kept typed so callers can react to one code (a missing
+/// transaction is `NOT_FOUND`, the only failure worth retrying) instead of matching message text.
+#[derive(Debug)]
+pub struct GrpcStatus(pub i64);
+
+/// gRPC `NOT_FOUND`.
+pub const GRPC_NOT_FOUND: i64 = 5;
+
+impl std::fmt::Display for GrpcStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "gRPC status {}", self.0)
+    }
+}
+
+impl std::error::Error for GrpcStatus {}
 
 /// gRPC-web client bound to one Sui full-node base URL.
 pub struct GrpcWeb {
     http: HttpClient,
     base_url: String,
     auth: Option<AuthHeader>,
+    timeout: std::time::Duration,
 }
 
 impl GrpcWeb {
     /// `base_url` is the full-node origin, e.g. `https://fullnode.testnet.sui.io:443`; `auth` is
     /// the optional `SUI_RPC_AUTH_HEADER`.
-    pub fn new(http: HttpClient, base_url: String, auth: Option<AuthHeader>) -> Self {
+    pub fn new(
+        http: HttpClient,
+        base_url: String,
+        auth: Option<AuthHeader>,
+        timeout: std::time::Duration,
+    ) -> Self {
         Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             auth,
+            timeout,
         }
     }
 
@@ -350,7 +373,12 @@ impl GrpcWeb {
         let url = format!("{}/{}", self.base_url, service_method);
         let (headers, body) = self
             .http
-            .post_grpc_web(&url, Bytes::from(frame(&request)), self.auth.as_ref())
+            .post_grpc_web(
+                &url,
+                Bytes::from(frame(&request)),
+                self.auth.as_ref(),
+                self.timeout,
+            )
             .await?;
         unframe(&headers, &body)
     }

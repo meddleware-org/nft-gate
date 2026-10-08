@@ -7,6 +7,8 @@ declare namespace Cloudflare {
     NONCE_STATE: DurableObjectNamespace
     NONCE_KV: KVNamespace
     UPSTREAM_URL: string
+    GATEWAY_ORIGIN: string
+    NETWORK: string
     SUI_RPC_URL: string
     NFT_TYPE: string
     PUBLIC_PATHS: string

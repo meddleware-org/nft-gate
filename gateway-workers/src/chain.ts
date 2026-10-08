@@ -18,6 +18,7 @@ import { ownsAccessNft } from '@meddleware/access-gate-client'
 import type { ChainQuery } from './verify.js'
 import { normalizeAddress, normalizeMoveType } from './verify.js'
 import { base64ToBytes } from './crypto.js'
+import type { SuiNetwork } from './config.js'
 
 type Json = unknown
 
@@ -31,10 +32,32 @@ interface CacheEntry {
   expiry: number
 }
 
-/** Number of `getTransaction` attempts (absorbs fullnode indexing lag after the client's finality wait). */
+/** Number of `getTransaction` attempts while the node still reports the digest as unknown (indexing lag). */
 const TX_FETCH_ATTEMPTS = 4
 /** Delay between `getTransaction` retries, in ms. */
 const TX_FETCH_RETRY_MS = 500
+/** Entries kept by the ownership cache; the oldest is dropped past it. */
+const MAX_CACHE_ENTRIES = 10_000
+/** Clock skew tolerated between a consume event's timestamp and this isolate's clock. */
+const CLOCK_SKEW_MS = 60_000
+
+/** Reject if `p` has not settled within `ms`, so a hung fullnode cannot hold a request (and its lease). */
+export async function withDeadline<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms} ms`)), ms)
+  })
+  try {
+    return await Promise.race([p, timeout])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+  }
+}
+
+/** True for the SDK's "transaction not found" error (the only failure worth retrying). */
+function isNotFound(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { reason?: unknown }).reason === 'notFound'
+}
 
 /** Production {@link ChainQuery} backed by the Sui gRPC API, with an optional ownership cache. */
 export class SuiGrpc implements ChainQuery {
@@ -43,24 +66,28 @@ export class SuiGrpc implements ChainQuery {
 
   /**
    * @param rpcUrl - Sui gRPC endpoint base URL (e.g. `https://fullnode.testnet.sui.io:443`).
-   * @param cacheTtlMs - Ownership-cache TTL in ms. 0 disables the cache (live check every request).
-   * @param authHeader - Optional header injected on every gRPC call (e.g. credentialed fullnode auth).
+   * @param network - The Sui network the endpoint serves (from config, never inferred from the URL).
+   * @param opts.cacheTtlMs - Ownership-cache TTL in ms. 0 disables the cache (live check every request).
+   * @param opts.authHeader - Optional header injected on every gRPC call (e.g. credentialed fullnode auth).
+   * @param opts.timeoutMs - Deadline for each chain read.
    */
   constructor(
-    private readonly rpcUrl: string,
-    /** Ownership-cache TTL (ms). 0 = disabled (every gated check is live on-chain). */
-    private readonly cacheTtlMs: number = 0,
-    authHeader?: { name: string; value: string },
+    rpcUrl: string,
+    network: SuiNetwork,
+    private readonly opts: {
+      cacheTtlMs: number
+      timeoutMs: number
+      authHeader?: { name: string; value: string }
+    },
   ) {
-    // The `network` label is cosmetic when an explicit `baseUrl` is supplied (core RPC resolves via
-    // the endpoint, not the label); infer it from the URL so a mainnet fullnode is labelled correctly.
-    const network = /mainnet/i.test(rpcUrl) ? 'mainnet' : 'testnet'
     this.client = new SuiGrpcClient({
       network,
       baseUrl: rpcUrl,
+      // Best effort: the server also gets the deadline. The authoritative bound is `withDeadline`.
+      timeout: opts.timeoutMs,
       // gRPC-web metadata keys must be lower-case ASCII; a credentialed fullnode auth header
       // (e.g. `Authorization: Bearer …`) is threaded here on every call.
-      ...(authHeader ? { meta: { [authHeader.name.toLowerCase()]: authHeader.value } } : {}),
+      ...(opts.authHeader ? { meta: { [opts.authHeader.name.toLowerCase()]: opts.authHeader.value } } : {}),
     })
   }
 
@@ -90,21 +117,22 @@ export class SuiGrpc implements ChainQuery {
   /**
    * Uncached, live ownership query over gRPC `listOwnedObjects`. Reuses `ownsAccessNft` from
    * `@meddleware/access-gate-client` (the same exact-type parse the frontends use), so the
-   * gateway and the clients agree on what counts as a held access NFT. Every page is read until
-   * the first match; a list too long to read throws, which denies (fail closed).
+   * gateway and the clients agree on what counts as a held access NFT: only a USABLE pass (unlimited,
+   * or single-use with uses left) counts. Every page is read until the first match; a list too long
+   * to read throws, which denies (fail closed).
    *
    * @param address - Sui address to query.
    * @param nftType - NFT struct type to filter by.
    * @param gateId - If given, only count objects whose `gate_id` field matches.
-   * @returns `true` if at least one qualifying NFT is owned.
+   * @returns `true` if at least one usable, qualifying NFT is owned.
    */
   private async ownsNftLive(address: string, nftType: string, gateId?: string): Promise<boolean> {
-    return ownsAccessNft(this.client, address, nftType, gateId)
+    return withDeadline(ownsAccessNft(this.client, address, nftType, gateId), this.opts.timeoutMs, 'ownership query')
   }
 
   /**
-   * Check whether `address` owns at least one NFT of `nftType`. Uses the in-process ownership
-   * cache when `cacheTtlMs > 0`; otherwise every call is live on-chain.
+   * Check whether `address` owns a usable NFT of `nftType`. Uses the in-process ownership cache
+   * (bounded, expired entries dropped) when `cacheTtlMs > 0`; otherwise every call is live on-chain.
    *
    * @param address - Sui address to check.
    * @param nftType - Fully-qualified NFT type string.
@@ -113,13 +141,16 @@ export class SuiGrpc implements ChainQuery {
    */
   async ownsNft(address: string, nftType: string, gateId?: string): Promise<boolean> {
     // Cache is OFF by default (ttl 0) so a gated action is confirmed live on-chain.
-    if (this.cacheTtlMs > 0) {
+    if (this.opts.cacheTtlMs > 0) {
       const key = SuiGrpc.cacheKey(address, nftType, gateId)
-      const hit = this.cache.get(key)
       const now = Date.now()
+      const hit = this.cache.get(key)
       if (hit && hit.expiry > now) return hit.owns
+      this.cache.delete(key)
       const owns = await this.ownsNftLive(address, nftType, gateId)
-      this.cache.set(key, { owns, expiry: now + this.cacheTtlMs })
+      for (const [k, v] of this.cache) if (v.expiry <= now) this.cache.delete(k)
+      while (this.cache.size >= MAX_CACHE_ENTRIES) this.cache.delete(this.cache.keys().next().value as string)
+      this.cache.set(key, { owns, expiry: now + this.opts.cacheTtlMs })
       return owns
     }
     return this.ownsNftLive(address, nftType, gateId)
@@ -130,60 +161,66 @@ export class SuiGrpc implements ChainQuery {
    * cached — pausing takes effect on the next request.
    *
    * @param gateId - The `Gate` shared object ID.
-   * @throws If the gate cannot be read (surfaces as ChainError → 502; fail closed).
+   * @throws If the gate cannot be read or its JSON is not the expected shape (surfaces as ChainError → 502; fail closed).
    */
   async gateAccessBlocked(gateId: string): Promise<boolean> {
-    const { object } = await this.client.core.getObject({ objectId: gateId, include: { json: true } })
+    const { object } = await withDeadline(
+      this.client.core.getObject({ objectId: gateId, include: { json: true } }),
+      this.opts.timeoutMs,
+      'gate read',
+    )
     return gateBlocksAccess(object.json)
   }
 
   /**
-   * Fetch a transaction by digest via gRPC, retrying briefly to absorb the window between the
-   * client's finality wait and the gateway fullnode indexing the transaction.
+   * Fetch a transaction by digest via gRPC. Only a "not found" answer is retried (a node can lag
+   * behind the client's finality wait); the final not-found is `null`, which denies (403). Any other
+   * failure (network, auth, server) throws at once and surfaces as ChainError → 502.
    *
-   * @param digest - Transaction digest to fetch.
-   * @returns The gRPC `TransactionResult` (`$kind: 'Transaction' | 'FailedTransaction'`).
-   * @throws If every attempt fails (surfaces as a {@link ChainQuery} ChainError → 502).
+   * @param digest - Transaction digest to fetch (shape already validated by the caller).
+   * @returns The gRPC `TransactionResult` (`$kind: 'Transaction' | 'FailedTransaction'`), or `null`.
    */
-  private async getTransaction(digest: string): Promise<Json> {
-    let lastErr: unknown
+  private async getTransaction(digest: string): Promise<Json | null> {
     for (let attempt = 0; attempt < TX_FETCH_ATTEMPTS; attempt++) {
       try {
-        return (await this.client.core.getTransaction({
-          digest,
-          include: { events: true },
-        })) as Json
+        return (await withDeadline(
+          this.client.core.getTransaction({ digest, include: { events: true } }),
+          this.opts.timeoutMs,
+          'transaction read',
+        )) as Json
       } catch (e) {
-        lastErr = e
-        if (attempt < TX_FETCH_ATTEMPTS - 1) {
-          await new Promise<void>((r) => setTimeout(r, TX_FETCH_RETRY_MS))
-        }
+        if (!isNotFound(e)) throw e
+        if (attempt < TX_FETCH_ATTEMPTS - 1) await new Promise<void>((r) => setTimeout(r, TX_FETCH_RETRY_MS))
       }
     }
-    throw lastErr instanceof Error ? lastErr : new Error(String(lastErr))
+    return null
   }
 
   /**
    * Verify a single-use consume by fetching its `consumeDigest` transaction directly and confirming
-   * it succeeded and emitted an `AccessConsumedEvent` for this sender + gate.
+   * it succeeded (effects status) and emitted an `AccessConsumedEvent` for this sender + gate that is
+   * no older than `maxAgeSecs`.
    *
    * The event is bound to the sender (which must equal the signature-verified proof address) and
    * the gate — NOT to the challenge nonce. Decoupling from the nonce is what lets an interrupted
    * upload resume with a fresh (free) challenge signature while reusing the same on-chain consume;
    * single-use is then enforced by the gateway's redemption store keying on this `consumeDigest`.
+   * The age bound keeps a consume from becoming redeemable again once the store has forgotten it.
    * An attacker cannot present someone else's consume (the event `sender` would not match the
    * signed address) nor forge one without owning the soulbound NFT.
    *
    * @param consumeDigest - Transaction digest of the on-chain consume.
    * @param address - The signature-verified proof address; must equal the event sender.
    * @param gateId - Optional gate object ID constraint.
-   * @returns `true` if the transaction confirms a matching consume.
+   * @param maxAgeSecs - Oldest accepted consume event.
+   * @returns `true` if the transaction confirms a matching, recent consume.
    */
   async consumeTxValid(
     consumeDigest: string,
     address: string,
     consumedEventType: string,
-    gateId?: string,
+    gateId: string | undefined,
+    maxAgeSecs: number,
   ): Promise<boolean> {
     const res = (await this.getTransaction(consumeDigest)) as Record<string, Json> | null
     // The gRPC result is a oneof: `{ $kind: 'Transaction', Transaction }` on success, or
@@ -193,14 +230,16 @@ export class SuiGrpc implements ChainQuery {
     const status = tx?.status as { success?: boolean } | undefined
     if (!status?.success) return false
     const events = (Array.isArray(tx?.events) ? (tx?.events as Json[]) : []) as Json[]
-    return events.some((ev) => isConsumedEvent(ev, consumedEventType) && eventMatches(ev, address, gateId))
+    const now = Date.now()
+    return events.some(
+      (ev) => isConsumedEvent(ev, consumedEventType) && eventMatches(ev, address, gateId) && eventIsRecent(ev, now, maxAgeSecs),
+    )
   }
 }
 
 // ── pure helpers (unit-tested; adapted to the gRPC event shape) ───────────────
-// gRPC events expose `eventType`/`sender`/`json`; JSON-RPC used `type`/`sender`/`parsedJson`.
-// The helpers read both keys so they stay tolerant to transport/shape variation (the SDK documents
-// that the `json` shape may differ between transports).
+// gRPC events expose `eventType`/`sender`/`json`. JSON-RPC is gone from public fullnodes, so only
+// that shape is read.
 
 /**
  * Traverse a nested JSON value by a sequence of object keys.
@@ -233,23 +272,36 @@ function pointerStr(v: Json, path: string[]): string | undefined {
   return typeof r === 'string' ? r : undefined
 }
 
-/** The event's Move type string, from the gRPC (`eventType`) or JSON-RPC (`type`) shape. */
+/** The event's Move type string (gRPC `eventType`). */
 function eventType(ev: Json): string | undefined {
-  return pointerStr(ev, ['eventType']) ?? pointerStr(ev, ['type'])
+  return pointerStr(ev, ['eventType'])
 }
 
-/** The event's parsed Move struct fields, from the gRPC (`json`) or JSON-RPC (`parsedJson`) shape. */
+/** The event's parsed Move struct fields (gRPC `json`). */
 function eventFields(ev: Json): Json {
-  return pointer(ev, ['json']) ?? pointer(ev, ['parsedJson'])
+  return pointer(ev, ['json'])
 }
 
 /**
  * True if a `Gate` object's JSON (gRPC core shape: fields flat) is paused and its policy has
- * `pause_blocks_access`. Gates without a `policy` (pre-policy package versions) never block.
+ * `pause_blocks_access`. Fails closed: JSON without a boolean `paused` and an object `policy` with a
+ * boolean `pause_blocks_access` is not understood, and throws (→ ChainError → deny) rather than
+ * reading as "not paused".
  */
 export function gateBlocksAccess(gateJson: Json): boolean {
   const g = gateJson as { paused?: unknown; policy?: { pause_blocks_access?: unknown } } | null
-  return Boolean(g && g.paused === true && g.policy && g.policy.pause_blocks_access === true)
+  const policy = g && typeof g === 'object' ? g.policy : undefined
+  if (
+    !g ||
+    typeof g !== 'object' ||
+    typeof g.paused !== 'boolean' ||
+    !policy ||
+    typeof policy !== 'object' ||
+    typeof policy.pause_blocks_access !== 'boolean'
+  ) {
+    throw new Error('gate JSON has an unrecognised shape')
+  }
+  return g.paused && policy.pause_blocks_access
 }
 
 /**
@@ -293,4 +345,17 @@ export function eventMatches(ev: Json, address: string, gateId?: string): boolea
   const gate = pointerStr(eventFields(ev), ['gate_id'])
   const gateOk = gateId === undefined ? true : gate !== undefined && normalizeAddress(gate) === normalizeAddress(gateId)
   return senderOk && gateOk
+}
+
+/**
+ * True if the event's `timestamp_ms` is at most `maxAgeSecs` old and not in the future (beyond clock
+ * skew). A missing or malformed timestamp is not recent: fail closed.
+ */
+export function eventIsRecent(ev: Json, nowMs: number, maxAgeSecs: number): boolean {
+  const raw = pointer(eventFields(ev), ['timestamp_ms'])
+  if (typeof raw !== 'string' && typeof raw !== 'number') return false
+  if (typeof raw === 'string' && !/^\d{1,16}$/.test(raw)) return false
+  const ts = Number(raw)
+  if (!Number.isSafeInteger(ts)) return false
+  return ts <= nowMs + CLOCK_SKEW_MS && nowMs - ts <= maxAgeSecs * 1000
 }

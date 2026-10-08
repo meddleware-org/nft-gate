@@ -73,7 +73,7 @@ cargo publish
 ## Conformance vectors
 
 Tests in `src/verify.rs` and `src/proof.rs` load `../../conformance/vectors.json` via
-`include_str!`. Run `node gateway-workers/scripts/gen-vectors.mjs > ../conformance/vectors.json`
+`include_str!`. Run `node scripts/sync-vectors.mjs` (the vectors are generated and published by `@meddleware/nft-gate-client`)
 (from the `nft-gate` repo root) to regenerate after any wire-format change.
 
 ## Relation to gateway-workers

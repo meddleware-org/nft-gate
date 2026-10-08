@@ -34,9 +34,23 @@ input — is in scope and treated as high severity:
    the address used for the on-chain sender/owner comparison must be the same normalized value.
 4. **Single-use is redeemed exactly once.** The on-chain consume digest is leased before proxying
    and committed on success; a committed redemption is never cleared, and an interrupted upload
-   releases the lease so the use is not lost.
-5. **The proxy does not leak or amplify.** Inbound `Authorization`/proof headers and hop-by-hop
-   headers are stripped before forwarding; request bodies are size-bounded; secrets are never logged.
+   releases the lease so the use is not lost. The lease belongs to a random owner token and commit
+   and release are compare-and-set on it, so a request whose lease lapsed can never clear or
+   overwrite a newer holder's. The lease outlives the upstream deadline (checked at startup), the
+   store must be durable (`SINGLE_USE=true` is refused with Workers KV, and in Rust without Redis),
+   a store failure is `503` and never a conflict, and a consume older than `CONSUME_MAX_AGE_SECS`
+   is refused so none can outlive its redemption record.
+5. **Proofs are bound to one audience.** The signed message (`nft-gate:access:v2`) carries the
+   gateway's origin, the gate id, the network and (single-use) the consume digest, and the gateway
+   rebuilds it from its own configuration, never from the token: a signature made for another
+   gateway, gate, network or consume is useless here, and there is no v1 fallback.
+6. **The proxy does not leak or amplify.** Hop-by-hop headers (and those named in `Connection`),
+   inbound credentials, cookies and spoofable forwarding fields are stripped before forwarding;
+   upstream cookies and CORS fields are stripped from the response; upstream redirects are never
+   followed; only `GET`/`HEAD`/`POST`/`PUT` are forwarded and public paths are `GET`/`HEAD` only;
+   request bodies and every upstream wait are bounded; secrets are never logged.
+7. **Configuration cannot silently weaken a mode.** An unknown boolean, a malformed number or
+   origin, or an inconsistent window stops startup; `ALLOWED_ORIGINS` defaults to none.
 
 ## Supported versions
 

@@ -9,12 +9,12 @@
 
 import type { Config, Env } from './config.js'
 import { loadConfig, isPublicPath } from './config.js'
-import type { NonceBackend } from './state/types.js'
+import type { NonceBackend, RedemptionStore } from './state/types.js'
 import { NONCE_SHARDS } from './state/types.js'
-import { makeBackend } from './state/select.js'
+import { makeBackends } from './state/select.js'
 import { SuiGrpc } from './chain.js'
 import { verifyAccessRequest, deniedReason } from './verify.js'
-import { forward } from './proxy.js'
+import { forward, FORWARDED_METHODS } from './proxy.js'
 import { runQuotaGuard } from './quota.js'
 import { redeemAndForward } from './redemption.js'
 import { withCors, corsPreflightResponse, resolveAllowedOrigin } from './cors.js'
@@ -28,6 +28,8 @@ export { NonceRateState } from './state/durable_object.js'
 interface GatewayState {
   cfg: Config
   backend: NonceBackend
+  /** Present exactly when `cfg.singleUse`. */
+  redemptions?: RedemptionStore
   chain: SuiGrpc
 }
 
@@ -46,19 +48,26 @@ async function getState(env: Env): Promise<GatewayState> {
   if (cached) return cached
   const cfg = loadConfig(env)
   // Honour an operator/quota-guard "degrade" flag once per isolate: prefer KV before DO
-  // free-tier limits bite (only when a KV binding is available).
+  // free-tier limits bite (only when a KV binding is available). Never in single-use mode: the
+  // redemption guarantee needs the Durable Object, and the flag must not change that silently.
   let effective = cfg
-  if (cfg.nonceBackend === 'durable-object' && env.NONCE_KV) {
+  if (!cfg.singleUse && cfg.nonceBackend === 'durable-object' && env.NONCE_KV) {
     try {
       if (await env.NONCE_KV.get('quota:degrade')) effective = { ...cfg, nonceBackend: 'kv' }
     } catch {
       /* ignore — stay on the configured backend */
     }
   }
+  const { backend, redemptions } = makeBackends(effective, env)
   cached = {
     cfg,
-    backend: guardBackend(makeBackend(effective, env)),
-    chain: new SuiGrpc(cfg.suiRpcUrl, cfg.ownershipCacheTtlMs, cfg.suiRpcAuthHeader),
+    backend: guardBackend(backend),
+    redemptions: redemptions && guardRedemptions(redemptions),
+    chain: new SuiGrpc(cfg.suiRpcUrl, cfg.network, {
+      cacheTtlMs: cfg.ownershipCacheTtlMs,
+      timeoutMs: cfg.rpcTimeoutMs,
+      authHeader: cfg.suiRpcAuthHeader,
+    }),
   }
   return cached
 }
@@ -66,27 +75,34 @@ async function getState(env: Env): Promise<GatewayState> {
 /** A nonce/rate/redemption store call failed (Durable Object or KV unavailable). */
 class StoreError extends Error {}
 
+/** Run `fn`, mapping any storage failure to a {@link StoreError}. */
+function wrapStore<A extends unknown[], R>(fn: (...args: A) => Promise<R>) {
+  return async (...args: A): Promise<R> => {
+    try {
+      return await fn(...args)
+    } catch (e) {
+      throw new StoreError((e as Error).message)
+    }
+  }
+}
+
 /**
  * Wrap every backend call so a storage failure surfaces as a {@link StoreError} — answered with a
- * JSON 503 (fail closed) rather than an unhandled exception without CORS headers.
+ * JSON 503 (fail closed, never a conflict) rather than an unhandled exception without CORS headers.
  */
 function guardBackend(backend: NonceBackend): NonceBackend {
-  const wrap =
-    <A extends unknown[], R>(fn: (...args: A) => Promise<R>) =>
-    async (...args: A): Promise<R> => {
-      try {
-        return await fn(...args)
-      } catch (e) {
-        throw new StoreError((e as Error).message)
-      }
-    }
   return {
-    issue: wrap(backend.issue.bind(backend)),
-    takeIfValid: wrap(backend.takeIfValid.bind(backend)),
-    rateCheck: wrap(backend.rateCheck.bind(backend)),
-    tryLeaseRedemption: wrap(backend.tryLeaseRedemption.bind(backend)),
-    commitRedemption: wrap(backend.commitRedemption.bind(backend)),
-    releaseRedemption: wrap(backend.releaseRedemption.bind(backend)),
+    issue: wrapStore(backend.issue.bind(backend)),
+    takeIfValid: wrapStore(backend.takeIfValid.bind(backend)),
+    rateCheck: wrapStore(backend.rateCheck.bind(backend)),
+  }
+}
+
+function guardRedemptions(store: RedemptionStore): RedemptionStore {
+  return {
+    tryLeaseRedemption: wrapStore(store.tryLeaseRedemption.bind(store)),
+    commitRedemption: wrapStore(store.commitRedemption.bind(store)),
+    releaseRedemption: wrapStore(store.releaseRedemption.bind(store)),
   }
 }
 
@@ -142,9 +158,22 @@ function regionOf(cfg: Config, request: Request): string {
   return continent && NONCE_SHARDS.has(continent) ? continent : 'g'
 }
 
-/** The client IP Cloudflare observed (the only trustworthy source at the edge). */
-function clientIp(request: Request): string {
-  return request.headers.get('CF-Connecting-IP') ?? 'unknown'
+/**
+ * The rate-limit key for the client Cloudflare observed (the only trustworthy source at the edge).
+ * IPv6 clients are keyed by their /64, since one subscriber controls the whole prefix and could
+ * otherwise rotate source addresses to dodge the limit and grow the store. A request that carries
+ * no `CF-Connecting-IP` (it did not come through Cloudflare) shares one `unknown` bucket.
+ */
+export function clientIp(request: Request): string {
+  const ip = request.headers.get('CF-Connecting-IP')
+  if (!ip) return 'unknown'
+  if (!ip.includes(':')) return ip
+  // Expand `::` so the first four groups are the /64.
+  const [head = '', tail = ''] = ip.split('::')
+  const h = head === '' ? [] : head.split(':')
+  const t = tail === '' || !ip.includes('::') ? [] : tail.split(':')
+  const groups = ip.includes('::') ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill('0'), ...t] : h
+  return groups.slice(0, 4).map((g) => g.toLowerCase().replace(/^0+(?=.)/, '')).join(':') + '::/64'
 }
 
 /**
@@ -217,7 +246,7 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
     console.error('gateway misconfigured:', (e as Error).message)
     return deny(500, 'gateway misconfigured')
   }
-  const { cfg, backend, chain } = state
+  const { cfg, backend, redemptions, chain } = state
 
   if (request.method === 'GET' && path === '/v1/challenge') {
     const region = regionOf(cfg, request)
@@ -233,11 +262,24 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   // Public passthrough (e.g. /v1/tip-config): forward without auth, but protect the single relay
   // origin — these bypass the NFT gate. Per-client-IP rate limit + edge-cache of GET responses.
   if (isPublicPath(cfg, path)) {
+    // Unauthenticated paths are read-only: a body-carrying method would reach the relay with no proof.
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      const res = deny(405, 'method not allowed')
+      res.headers.set('allow', 'GET, HEAD')
+      return res
+    }
     return forwardPublic(cfg, backend, request, regionOf(cfg, request), ctx)
   }
 
+  if (!FORWARDED_METHODS.includes(request.method)) return deny(405, 'method not allowed')
+
   const token = extractProofToken(request)
   if (!token) return deny(401, 'missing access proof')
+
+  // Verification costs CPU and a Durable Object call per request, so bound it per client first.
+  if (!(await backend.rateCheck(`pre:${clientIp(request)}`, cfg.gatedPreauthRateLimitPerMin, regionOf(cfg, request)))) {
+    return deny(429, 'rate limit exceeded')
+  }
 
   const result = await verifyAccessRequest(cfg, backend, token, chain)
   if (!result.ok) {
@@ -253,7 +295,8 @@ async function handle(request: Request, env: Env, ctx: ExecutionContext): Promis
   // proxy, then COMMIT on a successful upload or RELEASE on failure — so an interrupted upload
   // leaves the consume redeemable (the use is never lost) while a duplicate can't double-spend it.
   if (result.redemptionKey !== undefined) {
-    return redeemAndForward(cfg, backend, result.redemptionKey, () => forward(cfg, request))
+    if (!redemptions) throw new Error('single-use verified without a redemption store')
+    return redeemAndForward(cfg, redemptions, result.redemptionKey, () => forward(cfg, request))
   }
 
   return forward(cfg, request)

@@ -14,7 +14,7 @@
  */
 
 const CORS_STATIC_HEADERS: Record<string, string> = {
-  'access-control-allow-methods': 'GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS',
+  'access-control-allow-methods': 'GET, POST, PUT, HEAD, OPTIONS',
   'access-control-allow-headers': 'authorization, content-type, x-access-proof',
   'access-control-expose-headers': 'location, upload-offset',
   'access-control-max-age': '86400',
@@ -38,6 +38,8 @@ export function resolveAllowedOrigin(
  */
 export function withCors(res: Response, allowedOrigin: string | null): Response {
   const out = new Response(res.body, res)
+  // Only the gateway's own CORS policy applies: nothing an upstream or inner handler set survives.
+  for (const name of [...out.headers.keys()]) if (name.startsWith('access-control-')) out.headers.delete(name)
   if (allowedOrigin) out.headers.set('access-control-allow-origin', allowedOrigin)
   // The ACAO value depends on the request Origin, so any cache in front must key on it.
   out.headers.append('vary', 'Origin')

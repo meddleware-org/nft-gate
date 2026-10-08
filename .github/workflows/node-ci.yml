@@ -36,6 +36,10 @@ jobs:
       - name: Audit dependencies
         run: npm audit --audit-level=high
 
+      - name: Conformance vectors match the published protocol package
+        working-directory: .
+        run: node scripts/sync-vectors.mjs --check
+
       - name: Type-check
         run: npm run type-check
 

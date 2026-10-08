@@ -65,13 +65,26 @@ UPSTREAM_URL=http://relay:8080 SUI_RPC_URL=https://fullnode.mainnet.sui.io:443 \
   NFT_TYPE=0x<pkg>::access_gate::AccessNFT GATE_ID=0x<gate id> nft-gate-gateway
 ```
 
+(`GATEWAY_ORIGIN=https://<this gateway's public origin>` and `NETWORK=<localnet|devnet|testnet|mainnet>` are also required: they are signed into every proof.)
+
 See [gateway-rust/README.md](gateway-rust/README.md) for the full configuration reference.
 
 ## Wire protocol
 
 **Challenge** — `GET /v1/challenge` returns `{ nonce, expiresAt }`.
 
-**Signed message** — the client signs `nft-gate:access:<nonce>` as a Sui personal message (ed25519, secp256k1, or secp256r1).
+**Signed message** — the client signs an audience-bound, human-readable message as a Sui personal message (ed25519, secp256k1, or secp256r1):
+
+```text
+nft-gate:access:v2
+origin:<this gateway's canonical origin>
+gate:<0x + 64 lower-case hex>
+network:<localnet|devnet|testnet|mainnet>
+nonce:<nonce>
+consume:<base58 digest>        (single-use gateways only)
+```
+
+The gateway rebuilds it from its own `GATEWAY_ORIGIN`, `GATE_ID` and `NETWORK`, so a proof made for another gateway, gate, network or consume cannot be replayed here.
 
 **Proof token** — `base64(JSON { address, nonce, signature, consumeDigest? })`, sent as `Authorization: Bearer <token>` or `X-Access-Proof`.
 
@@ -85,10 +98,11 @@ redeemed, so no use is lost.
 
 ## Conformance
 
-`conformance/vectors.json` contains golden wire-format vectors signed with real Sui keypairs for all three signature schemes. Both gateway implementations test against these vectors. Regenerate with:
+`conformance/vectors.json` contains golden wire-format vectors signed with real Sui keypairs for all three signature schemes, plus audience-mismatch, negative-signature, ZIP-215 and token-grammar cases. They are generated and published by [`@meddleware/nft-gate-client`](https://github.com/meddleware-org/nft-gate-client) (the protocol's home); this repository keeps a copy so the Rust gateway can read it, and CI checks the copy against the installed package. Both gateway implementations test against it. After a protocol change, release the client, bump it here, then:
 
 ```bash
-node gateway-workers/scripts/gen-vectors.mjs > conformance/vectors.json
+node scripts/sync-vectors.mjs          # copy the installed package's vectors
+node scripts/sync-vectors.mjs --check  # CI: fail if the copy differs
 ```
 
 ## Choosing an implementation

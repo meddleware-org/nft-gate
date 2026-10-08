@@ -1,22 +1,31 @@
 /**
- * The pluggable state backend — the Workers analog of the Rust gateway's `NonceStore` enum
- * (in-memory | Redis). It holds the single-use nonce store AND the per-address rate-limit
- * windows, because both need the same per-key atomicity a stateless isolate cannot give.
+ * The pluggable state backends — the Workers analog of the Rust gateway's `NonceStore` enum
+ * (in-memory | Redis). {@link NonceBackend} holds the single-use nonce store and the rate-limit
+ * windows; {@link RedemptionStore} holds single-use redemptions. Both need per-key atomicity a
+ * stateless isolate cannot give.
  *
  * Two implementations:
  * - `DurableObjectBackend` (default): region-sharded, SQLite-backed Durable Objects. Strongly
  *   consistent, atomic single-use consume (the Redis-`GETDEL` analog). Free-tier eligible.
  * - `KvBackend`: Workers KV + best-effort rate limit. Eventually consistent (documented weaker
- *   cross-region replay window in the `SINGLE_USE=false` ownership mode).
+ *   cross-region replay window in the `SINGLE_USE=false` ownership mode; refused when
+ *   `SINGLE_USE=true`).
  */
 
 /**
- * Outcome of a redemption-lease attempt (single-use mode). `ok` — the caller now holds the lease
- * and must `commit`/`release` it. `leased` — another in-flight request holds it (concurrent
- * duplicate). `redeemed` — it was already committed (the use is spent).
+ * Outcome of a redemption-lease attempt (single-use mode). `ok` carries the owner `token` the
+ * caller must present to `commit`/`release`. `leased` — another in-flight request holds the lease.
+ * `redeemed` — it was already committed (the use is spent).
  */
-export type LeaseResult = 'ok' | 'leased' | 'redeemed'
+export type LeaseResult = { status: 'ok'; token: string } | { status: 'leased' } | { status: 'redeemed' }
 
+/**
+ * Outcome of a commit. `ok` — recorded as spent by the lease holder. `lost` — the lease had lapsed
+ * or belongs to another request, so nothing was changed (the caller must not report success).
+ */
+export type CommitResult = 'ok' | 'lost'
+
+/** Nonce issuance, single-use nonce consumption and rate-limit windows. */
 export interface NonceBackend {
   /**
    * Issue a fresh, time-bound nonce. `region` selects the DO shard (ignored by KV, which is
@@ -25,24 +34,28 @@ export interface NonceBackend {
   issue(region: string, ttlSecs: number): Promise<{ nonce: string; expiresAt: number }>
   /** Consume a nonce exactly once; true iff it was valid, unexpired, and unused. */
   takeIfValid(nonce: string): Promise<boolean>
-  /** Fixed 60s window per verified address. `maxPerMin === 0` disables limiting. */
+  /** Fixed 60s window per key. `maxPerMin === 0` disables limiting. */
   rateCheck(address: string, maxPerMin: number, region: string): Promise<boolean>
+}
 
-  // ── Single-use redemption (the permanent on-chain `consumeDigest` is the one-time token) ──
-  // A use is only spent when an upload actually succeeds: lease the digest, proxy, then commit on
-  // success or release on failure. An interrupted attempt leaves the digest redeemable, so a
-  // consumed NFT use is never lost. All three are atomic per key on the Durable Object backend.
-
+/**
+ * Single-use redemption (the permanent on-chain `consumeDigest` is the one-time token). A use is
+ * only spent when an upload actually succeeds: lease the digest, proxy, then commit on success or
+ * release on failure. Every transition is a compare-and-set on the owner token the lease returned,
+ * so a stale holder can never clear or overwrite a newer lease. Only the Durable Object backend
+ * implements it: it needs per-key atomicity that eventually-consistent KV cannot give.
+ */
+export interface RedemptionStore {
   /**
    * Atomically claim `key` for an in-flight upload. `ok` on a fresh/expired-lease/released key,
    * `leased` if another request holds an unexpired lease, `redeemed` if already committed. The
-   * lease self-expires after `leaseTtlSecs` so a crashed request cannot strand the key.
+   * lease self-expires after `leaseTtlSecs`; the config guarantees that exceeds the upload deadline.
    */
   tryLeaseRedemption(key: string, leaseTtlSecs: number): Promise<LeaseResult>
-  /** Permanently mark `key` redeemed (retained `retentionSecs`), after a successful upload. */
-  commitRedemption(key: string, retentionSecs: number): Promise<void>
-  /** Release a lease on `key` (upload failed) so the same consume can be retried immediately. */
-  releaseRedemption(key: string): Promise<void>
+  /** Mark `key` redeemed (retained `retentionSecs`) iff `token` still owns the lease. */
+  commitRedemption(key: string, token: string, retentionSecs: number): Promise<CommitResult>
+  /** Release the lease on `key` iff `token` still owns it (upload failed); never clears a commit. */
+  releaseRedemption(key: string, token: string): Promise<void>
 }
 
 /**

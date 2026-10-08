@@ -33,8 +33,13 @@ jobs:
         run: npm ci
       - name: Audit dependencies
         run: npm audit --audit-level=high
+      - name: Conformance vectors match the published protocol package
+        working-directory: .
+        run: node scripts/sync-vectors.mjs --check
       - name: Type-check
         run: npm run type-check --if-present
+      - name: Lint
+        run: npm run lint
       - name: Test
         run: npm run test:all
 

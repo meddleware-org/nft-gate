@@ -117,15 +117,54 @@ describe('router hardening', () => {
   })
 
   it('an unreachable upstream on a public path fails closed with a JSON body and CORS', async () => {
-    const res = await call('POST', '/v1/tip-config', { origin: ALLOWED_ORIGIN, 'CF-Connecting-IP': '203.0.113.9' })
+    const res = await call('GET', '/v1/tip-config', { origin: ALLOWED_ORIGIN, 'CF-Connecting-IP': '203.0.113.9' })
     expect(res.status).toBeGreaterThanOrEqual(500)
     expect(res.headers.get('content-type')).toMatch(/json/)
     expect(corsOrigin(res)).toBe(ALLOWED_ORIGIN)
+  })
+
+  it('public paths are read-only: a body-carrying method is 405 and never reaches the upstream', async () => {
+    const res = await call('POST', '/v1/tip-config', { origin: ALLOWED_ORIGIN, 'CF-Connecting-IP': '203.0.113.10' })
+    expect(res.status).toBe(405)
+    expect(res.headers.get('allow')).toBe('GET, HEAD')
+    expect(corsOrigin(res)).toBe(ALLOWED_ORIGIN)
+  })
+
+  it('gated paths refuse methods outside the list before any verification work', async () => {
+    const res = await call('DELETE', '/v1/blob-upload', { authorization: 'Bearer abc' })
+    expect(res.status).toBe(405)
+  })
+
+  it('rate-limits gated requests per client IP BEFORE verifying the proof', async () => {
+    const headers = { 'CF-Connecting-IP': '203.0.113.50', authorization: 'Bearer !!!not-base64!!!' }
+    let limited = 0
+    for (let i = 0; i < 125; i++) {
+      const res = await call('POST', '/v1/blob-upload', headers)
+      if (res.status === 429) limited++
+      else expect(res.status).toBe(403)
+    }
+    expect(limited).toBeGreaterThan(0) // GATED_PREAUTH_RATE_LIMIT_PER_MIN defaults to 120
+  })
+
+  it('upstream-supplied CORS never widens the allowlist', async () => {
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async () =>
+      new Response('{"tip":1}', { status: 200, headers: { 'access-control-allow-origin': '*', 'content-type': 'application/json' } })) as typeof fetch
+    try {
+      const res = await call('GET', '/v1/tip-config', { origin: DISALLOWED_ORIGIN, 'CF-Connecting-IP': '198.51.100.77' })
+      expect(res.status).toBe(200)
+      expect(corsOrigin(res)).toBeNull()
+      await new Promise((r) => setTimeout(r, 50)) // let the waitUntil cache.put land before others run
+    } finally {
+      globalThis.fetch = realFetch
+    }
   })
 })
 
 describe('public-path edge cache', () => {
   it('drops the query string from the cache key and the forwarded request', async () => {
+    // Other tests also fill the edge cache for this path; start clean.
+    await (caches as unknown as { default: Cache }).default.delete(new Request('https://gw.example.com/v1/tip-config'))
     const seen: string[] = []
     const realFetch = globalThis.fetch
     globalThis.fetch = (async (input: RequestInfo | URL) => {

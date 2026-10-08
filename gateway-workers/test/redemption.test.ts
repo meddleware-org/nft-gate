@@ -1,111 +1,116 @@
-import { describe, it, expect } from 'vitest'
-import { KvBackend } from '../src/state/kv.js'
+import { describe, it, expect, vi } from 'vitest'
 import { redeemAndForward } from '../src/redemption.js'
 import type { Config } from '../src/config.js'
+import type { CommitResult, LeaseResult, RedemptionStore } from '../src/state/types.js'
 
 /**
- * Exercise the REAL `KvBackend` redemption state machine against a Map-backed fake `KVNamespace`
- * (only `get`/`put`/`delete` are used; the logical expiry is stored in-value and checked on read,
- * so the fake need not honour `expirationTtl`). This runs in the Node unit pool — the Durable
- * Object variant is covered by `state.test.ts` in the cloudflare-integration pool.
+ * An in-memory {@link RedemptionStore} with the same owner-token compare-and-set semantics as the
+ * Durable Object (`state.test.ts` runs the real one in workerd). `clock` lets a test lapse a lease.
  */
-function fakeKv(): KVNamespace {
-  const m = new Map<string, string>()
-  return {
-    async get(key: string) {
-      return m.get(key) ?? null
-    },
-    async put(key: string, value: string) {
-      m.set(key, value)
-    },
-    async delete(key: string) {
-      m.delete(key)
-    },
-  } as unknown as KVNamespace
+class MemoryStore implements RedemptionStore {
+  rows = new Map<string, { state: 'leased' | 'committed'; expiry: number; token: string | null }>()
+  clock = 0
+  failCommit = false
+  private n = 0
+  async tryLeaseRedemption(key: string, leaseTtlSecs: number): Promise<LeaseResult> {
+    const r = this.rows.get(key)
+    if (r?.state === 'committed') return { status: 'redeemed' }
+    if (r?.state === 'leased' && r.expiry > this.clock) return { status: 'leased' }
+    const token = `t${++this.n}`
+    this.rows.set(key, { state: 'leased', expiry: this.clock + leaseTtlSecs * 1000, token })
+    return { status: 'ok', token }
+  }
+  async commitRedemption(key: string, token: string, retentionSecs: number): Promise<CommitResult> {
+    if (this.failCommit) throw new Error('store down')
+    const r = this.rows.get(key)
+    if (!r || r.state !== 'leased' || r.token !== token || r.expiry <= this.clock) return 'lost'
+    this.rows.set(key, { state: 'committed', expiry: this.clock + retentionSecs * 1000, token: null })
+    return 'ok'
+  }
+  async releaseRedemption(key: string, token: string): Promise<void> {
+    const r = this.rows.get(key)
+    if (r?.state === 'leased' && r.token === token) this.rows.delete(key)
+  }
 }
 
-describe('KvBackend redemption state machine', () => {
-  const key = () => '0xdigest' + Math.random().toString(16).slice(2)
+const cfg = { redemptionLeaseTtlSecs: 900, redemptionRetentionSecs: 3600 } as Config
+const ok = () => new Response('stored', { status: 200 })
+const body = async (r: Response) => (await r.json()) as { error?: string; code?: string }
 
-  it('leases once; a concurrent lease is rejected; commit marks it redeemed', async () => {
-    const store = new KvBackend(fakeKv())
-    const k = key()
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok')
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('leased')
-    await store.commitRedemption(k, 3600)
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('redeemed')
-  })
-
-  it('release makes an interrupted consume immediately re-leasable (use not lost)', async () => {
-    const store = new KvBackend(fakeKv())
-    const k = key()
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok')
-    await store.releaseRedemption(k)
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok')
-  })
-
-  it('release never clears a committed redemption', async () => {
-    const store = new KvBackend(fakeKv())
-    const k = key()
-    await store.tryLeaseRedemption(k, 120)
-    await store.commitRedemption(k, 3600)
-    await store.releaseRedemption(k)
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('redeemed')
-  })
-
-  it('an expired lease is reclaimable (crashed in-flight upload)', async () => {
-    const store = new KvBackend(fakeKv())
-    const k = key()
-    expect(await store.tryLeaseRedemption(k, 0)).toBe('ok') // lease already expired
-    expect(await store.tryLeaseRedemption(k, 120)).toBe('ok')
-  })
-})
-
-describe('redeemAndForward (lease → proxy → commit / release)', () => {
-  const cfg = { redemptionLeaseTtlSecs: 120, redemptionRetentionSecs: 3600 } as Config
-  const ok = () => Promise.resolve(new Response('stored', { status: 200 }))
-
-  it('commits after a successful upload, so the same consume is then redeemed', async () => {
-    const store = new KvBackend(fakeKv())
-    expect((await redeemAndForward(cfg, store, '0xd1', ok)).status).toBe(200)
-    const again = await redeemAndForward(cfg, store, '0xd1', ok)
+describe('redeemAndForward (owner-bound lease)', () => {
+  it('leases, forwards, commits; a second attempt is redeemed', async () => {
+    const store = new MemoryStore()
+    const first = await redeemAndForward(cfg, store, 'k', async () => ok())
+    expect(first.status).toBe(200)
+    const again = await redeemAndForward(cfg, store, 'k', async () => ok())
     expect(again.status).toBe(409)
-    expect(await again.json()).toMatchObject({ code: 'redeemed' })
+    expect((await body(again)).code).toBe('redeemed')
   })
 
-  it('releases after an upstream failure, so the consume stays usable', async () => {
-    const store = new KvBackend(fakeKv())
-    const fail = await redeemAndForward(cfg, store, '0xd2', () => Promise.resolve(new Response('no', { status: 503 })))
-    expect(fail.status).toBe(503)
-    expect((await redeemAndForward(cfg, store, '0xd2', ok)).status).toBe(200)
+  it('a concurrent duplicate gets 409 leased and does not forward', async () => {
+    const store = new MemoryStore()
+    const send = vi.fn(async () => ok())
+    let release!: () => void
+    const slow = redeemAndForward(cfg, store, 'k', () => new Promise<Response>((r) => (release = () => r(ok()))))
+    await Promise.resolve()
+    const dup = await redeemAndForward(cfg, store, 'k', send)
+    expect(dup.status).toBe(409)
+    expect((await body(dup)).code).toBe('leased')
+    expect(send).not.toHaveBeenCalled()
+    release()
+    expect((await slow).status).toBe(200)
+  })
+
+  it('a failed upload or a thrown error releases the lease so the consume stays usable', async () => {
+    const store = new MemoryStore()
+    expect((await redeemAndForward(cfg, store, 'k', async () => new Response('no', { status: 500 }))).status).toBe(500)
+    await expect(redeemAndForward(cfg, store, 'k', async () => { throw new Error('boom') })).rejects.toThrow('boom')
+    expect((await redeemAndForward(cfg, store, 'k', async () => ok())).status).toBe(200)
+  })
+
+  it('a stale holder cannot release or commit over a newer lease', async () => {
+    const store = new MemoryStore()
+    // A's lease lapses mid-forward; B then leases the same consume.
+    let finishA!: (r: Response) => void
+    const a = redeemAndForward(cfg, store, 'k', () => new Promise<Response>((r) => (finishA = r)))
+    await Promise.resolve()
+    store.clock += 901_000
+    let finishB!: (r: Response) => void
+    const b = redeemAndForward(cfg, store, 'k', () => new Promise<Response>((r) => (finishB = r)))
+    await Promise.resolve()
+    // A finishes with a failure: its release must not clear B's lease.
+    finishA(new Response('no', { status: 500 }))
+    expect((await a).status).toBe(500)
+    expect((await redeemAndForward(cfg, store, 'k', async () => ok())).status).toBe(409) // B still leased
+    // B succeeds and commits.
+    finishB(ok())
+    expect((await b).status).toBe(200)
+    expect((await redeemAndForward(cfg, store, 'k', async () => ok())).status).toBe(409)
+  })
+
+  it('a holder whose lease lapsed before commit is told 502, never success, and leaves the row alone', async () => {
+    const store = new MemoryStore()
+    const lapsed = await redeemAndForward(cfg, store, 'k', async () => {
+      store.clock += 901_000 // the lease expires while the upload runs
+      return ok()
+    })
+    expect(lapsed.status).toBe(502)
+    expect(store.rows.get('k')?.state).toBe('leased') // untouched, not committed by the stale holder
   })
 
   it('reports a failed commit as 502 (never success) and releases the lease', async () => {
-    const store = new KvBackend(fakeKv())
-    const released: string[] = []
-    const failingCommit = Object.assign(Object.create(store), {
-      commitRedemption: async () => {
-        throw new Error('storage down')
-      },
-      releaseRedemption: async (k: string) => {
-        released.push(k)
-        await store.releaseRedemption(k)
-      },
-    }) as KvBackend
-    const res = await redeemAndForward(cfg, failingCommit, '0xd3', ok)
+    const store = new MemoryStore()
+    store.failCommit = true
+    const res = await redeemAndForward(cfg, store, 'k', async () => ok())
     expect(res.status).toBe(502)
-    expect(await res.json()).toEqual({ error: 'redemption commit failed' })
-    expect(released).toEqual(['0xd3'])
-    // The consume was not spent: it can be redeemed once storage recovers.
-    expect((await redeemAndForward(cfg, store, '0xd3', ok)).status).toBe(200)
+    expect(store.rows.has('k')).toBe(false)
   })
 
-  it('releases and rethrows when the upstream request itself throws', async () => {
-    const store = new KvBackend(fakeKv())
-    await expect(redeemAndForward(cfg, store, '0xd4', () => Promise.reject(new Error('network')))).rejects.toThrow(
-      'network',
-    )
-    expect(await store.tryLeaseRedemption('0xd4', 120)).toBe('ok')
+  it('a store error while leasing propagates (the router answers 503, never a conflict)', async () => {
+    const store = new MemoryStore()
+    store.tryLeaseRedemption = async () => {
+      throw new Error('store down')
+    }
+    await expect(redeemAndForward(cfg, store, 'k', async () => ok())).rejects.toThrow('store down')
   })
 })
-

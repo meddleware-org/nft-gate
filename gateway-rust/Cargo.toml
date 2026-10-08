@@ -1,6 +1,6 @@
 [package]
 name = "nft-gate-gateway"
-version = "0.0.18"
+version = "0.0.19"
 edition = "2021"
 # The dependency graph's floor (checked in CI by the `msrv` job).
 rust-version = "1.88"
@@ -20,12 +20,12 @@ path = "src/main.rs"
 axum = "0.7"
 # In-flight request cap + load shedding (MAX_CONCURRENT_REQUESTS); same tower as axum 0.7.
 tower = { version = "0.5", features = ["limit", "load-shed"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 # HTTP client: hyper 1.x + hyper-rustls instead of reqwest to avoid the
 # url → idna → icu_normalizer compile chain (~10 min on GHA).
 bytes = "1"
-hyper = { version = "1", features = ["http1", "client"] }
-hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1"] }
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "client", "client-legacy", "http1", "server", "service"] }
 hyper-rustls = { version = "0.27", features = ["webpki-tokio", "http1"] }
 http-body-util = "0.1"
 serde = { version = "1", features = ["derive"] }

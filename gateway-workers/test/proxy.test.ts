@@ -4,7 +4,12 @@ import type { Config } from '../src/config.js'
 
 // Body-size enforcement in the real workerd runtime (streams, FixedLengthStream, abort).
 const CAP = 1000
-const cfg = { upstreamUrl: 'https://upstream.invalid', maxBodyBytes: CAP, upstreamAuthHeaders: [] } as unknown as Config
+const cfg = {
+  upstreamUrl: 'https://upstream.invalid',
+  maxBodyBytes: CAP,
+  upstreamTimeoutMs: 5000,
+  upstreamAuthHeaders: [{ name: 'CF-Access-Client-Id', value: 'svc-id' }],
+} as unknown as Config
 
 interface Seen {
   bytes: Uint8Array
@@ -125,5 +130,99 @@ describe('forward body limit', () => {
     })
     const res = await forward(cfg, post(payload(10), { 'content-length': '10' }))
     expect(res.status).toBe(502)
+  })
+})
+
+describe('forward redirects', () => {
+  it('never follows a redirect: the service-token headers must not reach the Location host', async () => {
+    const calls: Array<{ url: string; redirect?: string }> = []
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+      calls.push({ url, redirect: init.redirect })
+      return new Response(null, { status: 302, headers: { location: 'https://evil.example/steal' } })
+    })
+    const res = await forward(cfg, new Request('https://gw.example.com/v1/x', { method: 'GET' }))
+    expect(calls).toEqual([{ url: 'https://upstream.invalid/v1/x', redirect: 'manual' }])
+    expect(res.status).toBe(502)
+    expect(res.headers.get('location')).toBeNull()
+  })
+})
+
+describe('forward deadline', () => {
+  it('ends a stalled upstream with 504 once the total deadline passes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_, reject) => init.signal!.addEventListener('abort', () => reject(init.signal!.reason))),
+    )
+    const started = Date.now()
+    const res = await forward({ ...cfg, upstreamTimeoutMs: 50 } as Config, new Request('https://gw.example.com/v1/x'))
+    expect(res.status).toBe(504)
+    expect(Date.now() - started).toBeLessThan(2000)
+  })
+})
+
+describe('forward header policy', () => {
+  it('strips hop-by-hop (and Connection-named), credential and spoofable request fields', async () => {
+    let sent: Headers | undefined
+    vi.stubGlobal('fetch', async (_url: string, init: RequestInit) => {
+      sent = new Headers(init.headers)
+      return new Response('ok')
+    })
+    await forward(
+      cfg,
+      new Request('https://gw.example.com/v1/x', {
+        headers: {
+          connection: 'x-secret-hop, close',
+          'x-secret-hop': 'v',
+          'keep-alive': 'timeout=5',
+          te: 'trailers',
+          upgrade: 'websocket',
+          'proxy-authorization': 'Basic abc',
+          authorization: 'Bearer proof',
+          'x-access-proof': 'proof',
+          cookie: 'session=1',
+          forwarded: 'for=1.2.3.4',
+          'x-forwarded-for': '1.2.3.4',
+          via: '1.1 evil',
+          'cf-access-client-secret': 'client-supplied',
+          'x-keep-me': 'yes',
+        },
+      }),
+    )
+    for (const name of ['connection', 'x-secret-hop', 'keep-alive', 'te', 'upgrade', 'proxy-authorization', 'authorization', 'x-access-proof', 'cookie', 'forwarded', 'x-forwarded-for', 'via', 'cf-access-client-secret']) {
+      expect(sent!.has(name), name).toBe(false)
+    }
+    expect(sent!.get('x-keep-me')).toBe('yes')
+    expect(sent!.get('cf-access-client-id')).toBe('svc-id') // the gateway's own credential, set last
+  })
+
+  it('filters the response: no hop-by-hop, cookies or upstream CORS', async () => {
+    vi.stubGlobal(
+      'fetch',
+      async () =>
+        new Response('ok', {
+          headers: {
+            'keep-alive': 'timeout=5',
+            'set-cookie': 'a=b',
+            'access-control-allow-origin': '*',
+            'access-control-allow-credentials': 'true',
+            'x-relay': 'kept',
+          },
+        }),
+    )
+    const res = await forward(cfg, new Request('https://gw.example.com/v1/x'))
+    for (const name of ['keep-alive', 'set-cookie', 'access-control-allow-origin', 'access-control-allow-credentials']) {
+      expect(res.headers.has(name), name).toBe(false)
+    }
+    expect(res.headers.get('x-relay')).toBe('kept')
+  })
+
+  it('refuses a method outside the list and an unsafe path before contacting the upstream', async () => {
+    const spy = vi.fn()
+    vi.stubGlobal('fetch', spy)
+    expect((await forward(cfg, new Request('https://gw.example.com/v1/x', { method: 'DELETE' }))).status).toBe(405)
+    expect((await forward(cfg, new Request('https://gw.example.com/a%2fb'))).status).toBe(400)
+    expect((await forward(cfg, new Request('https://gw.example.com/a//b'))).status).toBe(400)
+    expect(spy).not.toHaveBeenCalled()
   })
 })

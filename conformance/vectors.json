@@ -1,20 +1,163 @@
 {
-  "description": "Golden wire-format vectors shared by the Rust and Workers gateways. `signatures` are real Sui personal-message signatures over `nft-gate:access:<nonce>` that a verifier must accept for `address`; `negativeSignatures` must be rejected; `zip215` pins ed25519 verification to ZIP-215 (Sui's rule). Regenerate with: node gateway-workers/scripts/gen-vectors.mjs > conformance/vectors.json",
+  "description": "Conformance vectors shared by the nft-gate gateways and clients (protocol nft-gate:access:v2). `personalMessage.cases` are the exact signed bytes for a context; `personalMessageRejects` are contexts no implementation may sign or accept; `signatures` are real Sui personal-message signatures that must verify against the message rebuilt from `context`; `audienceMismatch` are valid signatures whose verifier-side context differs in one bound field and must be refused; `negativeSignatures` must be refused; `zip215` pins ed25519 to ZIP-215 (Sui's rule); `proofDecode*` pin the token grammar; `addressNormalization` pins canonical addresses. Regenerate with: node scripts/gen-vectors.mjs > vectors.json",
+  "version": "nft-gate:access:v2",
   "personalMessage": {
-    "nonce": "GOLDEN-NONCE-123",
-    "messageUtf8": "nft-gate:access:GOLDEN-NONCE-123",
-    "messageBytesBase64": "bmZ0LWdhdGU6YWNjZXNzOkdPTERFTi1OT05DRS0xMjM="
+    "cases": [
+      {
+        "name": "ownership gateway",
+        "context": {
+          "origin": "https://gateway.example",
+          "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "network": "testnet",
+          "nonce": "GOLDEN-NONCE-123"
+        },
+        "messageUtf8": "nft-gate:access:v2\norigin:https://gateway.example\ngate:0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\nnetwork:testnet\nnonce:GOLDEN-NONCE-123",
+        "messageBytesBase64": "bmZ0LWdhdGU6YWNjZXNzOnYyCm9yaWdpbjpodHRwczovL2dhdGV3YXkuZXhhbXBsZQpnYXRlOjB4YTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMQpuZXR3b3JrOnRlc3RuZXQKbm9uY2U6R09MREVOLU5PTkNFLTEyMw=="
+      },
+      {
+        "name": "single-use gateway",
+        "context": {
+          "origin": "https://gateway.example",
+          "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "network": "testnet",
+          "nonce": "GOLDEN-NONCE-123",
+          "consumeDigest": "5Wq9tE4gXz8hEvFhYt8KkTJb2Pp6qXqj8cRk3xN1mYdL"
+        },
+        "messageUtf8": "nft-gate:access:v2\norigin:https://gateway.example\ngate:0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1\nnetwork:testnet\nnonce:GOLDEN-NONCE-123\nconsume:5Wq9tE4gXz8hEvFhYt8KkTJb2Pp6qXqj8cRk3xN1mYdL",
+        "messageBytesBase64": "bmZ0LWdhdGU6YWNjZXNzOnYyCm9yaWdpbjpodHRwczovL2dhdGV3YXkuZXhhbXBsZQpnYXRlOjB4YTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMWExYTFhMQpuZXR3b3JrOnRlc3RuZXQKbm9uY2U6R09MREVOLU5PTkNFLTEyMwpjb25zdW1lOjVXcTl0RTRnWHo4aEV2RmhZdDhLa1RKYjJQcDZxWHFqOGNSazN4TjFtWWRM"
+      }
+    ]
   },
+  "personalMessageRejects": [
+    {
+      "name": "non-canonical origin: http on a non-loopback host",
+      "context": {
+        "origin": "http://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      }
+    },
+    {
+      "name": "non-canonical origin: upper-case host",
+      "context": {
+        "origin": "https://Gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      }
+    },
+    {
+      "name": "non-canonical origin: trailing slash",
+      "context": {
+        "origin": "https://gateway.example/",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      }
+    },
+    {
+      "name": "non-canonical origin: default port",
+      "context": {
+        "origin": "https://gateway.example:443",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      }
+    },
+    {
+      "name": "non-canonical origin: credentials",
+      "context": {
+        "origin": "https://user@gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      }
+    },
+    {
+      "name": "gate id: upper-case hex",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xA1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1A1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      }
+    },
+    {
+      "name": "gate id: short",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0x1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      }
+    },
+    {
+      "name": "network: unknown",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet2",
+        "nonce": "GOLDEN-NONCE-123"
+      }
+    },
+    {
+      "name": "nonce: contains a newline (line injection)",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "n\nconsume:abc"
+      }
+    },
+    {
+      "name": "nonce: contains a space",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "a b"
+      }
+    },
+    {
+      "name": "nonce: empty",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": ""
+      }
+    },
+    {
+      "name": "nonce: 129 characters",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "consume digest: not base58",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123",
+        "consumeDigest": "DIGEST-1"
+      }
+    }
+  ],
   "proofDecode": {
-    "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoicyJ9",
+    "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSJ9",
     "expect": {
       "address": "0x1",
       "nonce": "n",
-      "signature": "s"
+      "signature": "AAAA"
     }
   },
   "proofDecodeRejects": {
-    "description": "Tokens every decoder must reject before verification: longer than 4096 characters (checked before base64/JSON parsing), or with a non-ASCII address, nonce or signature (the gateways issue ASCII-only nonces).",
+    "description": "Tokens every decoder must reject before verification (size, ASCII, and the field grammar).",
     "cases": [
       {
         "name": "oversized",
@@ -22,16 +165,68 @@
       },
       {
         "name": "non-ASCII nonce",
-        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuw7ZuY2UiLCJzaWduYXR1cmUiOiJzIn0="
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuw7ZuY2UiLCJzaWduYXR1cmUiOiJBQUFBIn0="
       },
       {
         "name": "non-ASCII address",
-        "token": "eyJhZGRyZXNzIjoiMHjDqTEiLCJub25jZSI6Im4iLCJzaWduYXR1cmUiOiJzIn0="
+        "token": "eyJhZGRyZXNzIjoiMHjDqTEiLCJub25jZSI6Im4iLCJzaWduYXR1cmUiOiJBQUFBIn0="
+      },
+      {
+        "name": "empty address",
+        "token": "eyJhZGRyZXNzIjoiIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSJ9"
+      },
+      {
+        "name": "address without 0x",
+        "token": "eyJhZGRyZXNzIjoiMTIzNCIsIm5vbmNlIjoibiIsInNpZ25hdHVyZSI6IkFBQUEifQ=="
+      },
+      {
+        "name": "address not hex",
+        "token": "eyJhZGRyZXNzIjoiMHh6eiIsIm5vbmNlIjoibiIsInNpZ25hdHVyZSI6IkFBQUEifQ=="
+      },
+      {
+        "name": "address longer than 64 hex digits",
+        "token": "eyJhZGRyZXNzIjoiMHgxMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMSIsIm5vbmNlIjoibiIsInNpZ25hdHVyZSI6IkFBQUEifQ=="
+      },
+      {
+        "name": "empty nonce",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiIiLCJzaWduYXR1cmUiOiJBQUFBIn0="
+      },
+      {
+        "name": "nonce with a space",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJhIGIiLCJzaWduYXR1cmUiOiJBQUFBIn0="
+      },
+      {
+        "name": "empty signature",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiIn0="
+      },
+      {
+        "name": "signature not base64",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiKioqIn0="
+      },
+      {
+        "name": "consume digest not base58",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImNvbnN1bWVEaWdlc3QiOiJESUdFU1QtMSJ9"
+      },
+      {
+        "name": "consume digest empty",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImNvbnN1bWVEaWdlc3QiOiIifQ=="
+      },
+      {
+        "name": "consume digest not a string",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImNvbnN1bWVEaWdlc3QiOjd9"
+      },
+      {
+        "name": "JSON array",
+        "token": "WyIweDEiXQ=="
+      },
+      {
+        "name": "JSON null",
+        "token": "bnVsbA=="
       }
     ]
   },
   "addressNormalization": {
-    "description": "Both gateways canonicalise the proof address (normalizeAddress / normalize_address) before comparing to on-chain owners: strip 0x, lower-case, zero-pad to 64 hex, re-prefix 0x. Static cases (no keypair).",
+    "description": "Both gateways canonicalise the proof address before comparing to on-chain owners: strip 0x, lower-case, zero-pad to 64 hex, re-prefix 0x.",
     "cases": [
       {
         "input": "0x1",
@@ -51,90 +246,264 @@
     {
       "scheme": "ed25519",
       "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "AMbu0NHeMayTIgBqOim2lSCohB02rs8LiJA1vqLkE3qihvQJK4B5oEuElNkn5gxbOx8lcs5+m/Aaed5H/CeBpAfqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
-      "proofToken": "eyJhZGRyZXNzIjoiMHhhMGNjYzhiY2M4M2Y2YzYyODM0MDEzNGY4NTQ2YTIxZTA2MThmZDFhYWEwMjQzMmJiYTQ1NGM0YTJjMjIzM2RhIiwibm9uY2UiOiJHT0xERU4tTk9OQ0UtMTIzIiwic2lnbmF0dXJlIjoiQU1idTBOSGVNYXlUSWdCcU9pbTJsU0NvaEIwMnJzOExpSkExdnFMa0UzcWlodlFKSzRCNW9FdUVsTmtuNWd4Yk94OGxjczUrbS9BYWVkNUgvQ2VCcEFmcVNteGo0cHhTQ3I3MVVIc1RMc1g1bFVkMnJyNitlNUpDSHVwcEZFYlNMQT09In0=",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "AHjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "proofToken": "eyJhZGRyZXNzIjoiMHhhMGNjYzhiY2M4M2Y2YzYyODM0MDEzNGY4NTQ2YTIxZTA2MThmZDFhYWEwMjQzMmJiYTQ1NGM0YTJjMjIzM2RhIiwibm9uY2UiOiJHT0xERU4tTk9OQ0UtMTIzIiwic2lnbmF0dXJlIjoiQUhqWFdtSmJuTVk4QUxadDc1RkpSZmhicXpGL0lZSFZqUmhhRlowbkcyaExISkFiOXlFUlhCUE4zc0dDVkpiM0xtSzIwSmQ4YkhJdU94cUlrcnYzNndqcVNteGo0cHhTQ3I3MVVIc1RMc1g1bFVkMnJyNitlNUpDSHVwcEZFYlNMQT09In0=",
       "expect": true
     },
     {
       "scheme": "secp256k1",
       "address": "0xff54162ff5cf6c25b2f6985ef274f1709ccf58175188a572ecfea4b1423c8ca0",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "Abqtk1+ADD3p1Fo0glck814uYjkPTewQYQ0obvomXMCVTowBByXwf1yeAq/ocjxg+llZ7N75raPsBlrhWyAyf7MCVrMoswyL9YOeJAWHR4eUCL2zYkHcnC58YZ+qErKSCWc=",
-      "proofToken": "eyJhZGRyZXNzIjoiMHhmZjU0MTYyZmY1Y2Y2YzI1YjJmNjk4NWVmMjc0ZjE3MDljY2Y1ODE3NTE4OGE1NzJlY2ZlYTRiMTQyM2M4Y2EwIiwibm9uY2UiOiJHT0xERU4tTk9OQ0UtMTIzIiwic2lnbmF0dXJlIjoiQWJxdGsxK0FERDNwMUZvMGdsY2s4MTR1WWprUFRld1FZUTBvYnZvbVhNQ1ZUb3dCQnlYd2YxeWVBcS9vY2p4ZytsbFo3Tjc1cmFQc0JscmhXeUF5ZjdNQ1ZyTW9zd3lMOVlPZUpBV0hSNGVVQ0wyellrSGNuQzU4WVorcUVyS1NDV2M9In0=",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "ATP4RPmUcS9r6ldY1oHi2+YjiamXVqwtSNGvpatP+2t2a3NYif9wA53lSaFindwt0QU/2tGrjl+dFzJIBzFxl3sCVrMoswyL9YOeJAWHR4eUCL2zYkHcnC58YZ+qErKSCWc=",
+      "proofToken": "eyJhZGRyZXNzIjoiMHhmZjU0MTYyZmY1Y2Y2YzI1YjJmNjk4NWVmMjc0ZjE3MDljY2Y1ODE3NTE4OGE1NzJlY2ZlYTRiMTQyM2M4Y2EwIiwibm9uY2UiOiJHT0xERU4tTk9OQ0UtMTIzIiwic2lnbmF0dXJlIjoiQVRQNFJQbVVjUzlyNmxkWTFvSGkyK1lqaWFtWFZxd3RTTkd2cGF0UCsydDJhM05ZaWY5d0E1M2xTYUZpbmR3dDBRVS8ydEdyamwrZEZ6SklCekZ4bDNzQ1ZyTW9zd3lMOVlPZUpBV0hSNGVVQ0wyellrSGNuQzU4WVorcUVyS1NDV2M9In0=",
       "expect": true
     },
     {
       "scheme": "secp256r1",
       "address": "0xaf8a25b8923b42abaac0cc3d594583102ed122e6934a69bc3b6e93db36d0e9dc",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "AlbjqC3TD5uR0+MxXt3vfN4k2b3ceV9XvAVBMwgxlepxWlMWk32Is4jPLktJQty3DRMlMEIpjCUWZw+G+yv30Q4DIJwxe2N5Nd09ocVPY0ld+zH5fSk98IVxAyBZXJqsuD8=",
-      "proofToken": "eyJhZGRyZXNzIjoiMHhhZjhhMjViODkyM2I0MmFiYWFjMGNjM2Q1OTQ1ODMxMDJlZDEyMmU2OTM0YTY5YmMzYjZlOTNkYjM2ZDBlOWRjIiwibm9uY2UiOiJHT0xERU4tTk9OQ0UtMTIzIiwic2lnbmF0dXJlIjoiQWxianFDM1RENXVSMCtNeFh0M3ZmTjRrMmIzY2VWOVh2QVZCTXdneGxlcHhXbE1XazMySXM0alBMa3RKUXR5M0RSTWxNRUlwakNVV1p3K0creXYzMFE0RElKd3hlMk41TmQwOW9jVlBZMGxkK3pINWZTazk4SVZ4QXlCWlhKcXN1RDg9In0=",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "Anyye7JlQ7qQYANKEWpXboVixEqnM06zVN54HTem/0wSNNMFOzEr+GN/NmsYqgcwVNqL7plY9Pyo5GXgHQP8Wx8DIJwxe2N5Nd09ocVPY0ld+zH5fSk98IVxAyBZXJqsuD8=",
+      "proofToken": "eyJhZGRyZXNzIjoiMHhhZjhhMjViODkyM2I0MmFiYWFjMGNjM2Q1OTQ1ODMxMDJlZDEyMmU2OTM0YTY5YmMzYjZlOTNkYjM2ZDBlOWRjIiwibm9uY2UiOiJHT0xERU4tTk9OQ0UtMTIzIiwic2lnbmF0dXJlIjoiQW55eWU3SmxRN3FRWUFOS0VXcFhib1ZpeEVxbk0wNnpWTjU0SFRlbS8wd1NOTk1GT3pFcitHTi9ObXNZcWdjd1ZOcUw3cGxZOVB5bzVHWGdIUVA4V3g4RElKd3hlMk41TmQwOW9jVlBZMGxkK3pINWZTazk4SVZ4QXlCWlhKcXN1RDg9In0=",
       "expect": true
+    },
+    {
+      "scheme": "ed25519 single-use",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123",
+        "consumeDigest": "5Wq9tE4gXz8hEvFhYt8KkTJb2Pp6qXqj8cRk3xN1mYdL"
+      },
+      "signature": "AOGh7vaz1pyInQuMWZzO9M28bMUsJXFNOZn2Qt0DP8uSgnAF2IdC9X4nwHTcVd1+2sVl47WXgo2umgNnOK/ADwvqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "proofToken": "eyJhZGRyZXNzIjoiMHhhMGNjYzhiY2M4M2Y2YzYyODM0MDEzNGY4NTQ2YTIxZTA2MThmZDFhYWEwMjQzMmJiYTQ1NGM0YTJjMjIzM2RhIiwibm9uY2UiOiJHT0xERU4tTk9OQ0UtMTIzIiwic2lnbmF0dXJlIjoiQU9HaDd2YXoxcHlJblF1TVdaek85TTI4Yk1Vc0pYRk5PWm4yUXQwRFA4dVNnbkFGMklkQzlYNG53SFRjVmQxKzJzVmw0N1dYZ28ydW1nTm5PSy9BRHd2cVNteGo0cHhTQ3I3MVVIc1RMc1g1bFVkMnJyNitlNUpDSHVwcEZFYlNMQT09IiwiY29uc3VtZURpZ2VzdCI6IjVXcTl0RTRnWHo4aEV2RmhZdDhLa1RKYjJQcDZxWHFqOGNSazN4TjFtWWRMIn0=",
+      "expect": true
+    }
+  ],
+  "audienceMismatch": [
+    {
+      "case": "wrong origin",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "signature": "AHjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://other.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "expect": false
+    },
+    {
+      "case": "wrong gate",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "signature": "AHjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "expect": false
+    },
+    {
+      "case": "wrong network",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "signature": "AHjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "mainnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "expect": false
+    },
+    {
+      "case": "wrong nonce",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "signature": "AHjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-124"
+      },
+      "expect": false
+    },
+    {
+      "case": "gateway is single-use but the signature has no consume line",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "signature": "AHjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123",
+        "consumeDigest": "5Wq9tE4gXz8hEvFhYt8KkTJb2Pp6qXqj8cRk3xN1mYdL"
+      },
+      "expect": false
+    },
+    {
+      "case": "gateway is not single-use but the signature has a consume line",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "signature": "AOGh7vaz1pyInQuMWZzO9M28bMUsJXFNOZn2Qt0DP8uSgnAF2IdC9X4nwHTcVd1+2sVl47WXgo2umgNnOK/ADwvqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "expect": false
+    },
+    {
+      "case": "single-use: wrong consume digest",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "signature": "AOGh7vaz1pyInQuMWZzO9M28bMUsJXFNOZn2Qt0DP8uSgnAF2IdC9X4nwHTcVd1+2sVl47WXgo2umgNnOK/ADwvqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123",
+        "consumeDigest": "9Wq9tE4gXz8hEvFhYt8KkTJb2Pp6qXqj8cRk3xN1mYdL"
+      },
+      "expect": false
+    },
+    {
+      "case": "v1 message (no audience) is refused",
+      "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
+      "signature": "AMbu0NHeMayTIgBqOim2lSCohB02rs8LiJA1vqLkE3qihvQJK4B5oEuElNkn5gxbOx8lcs5+m/Aaed5H/CeBpAfqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "expect": false
     }
   ],
   "negativeSignatures": [
     {
       "case": "secp256k1 high-S",
       "address": "0xff54162ff5cf6c25b2f6985ef274f1709ccf58175188a572ecfea4b1423c8ca0",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "Abqtk1+ADD3p1Fo0glck814uYjkPTewQYQ0obvomXMCVsXP++NoPgKNh/VAXjcOfBGFU8Ae1mvxPuXd9MbADwY4CVrMoswyL9YOeJAWHR4eUCL2zYkHcnC58YZ+qErKSCWc=",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "ATP4RPmUcS9r6ldY1oHi2+YjiamXVqwtSNGvpatP+2t2lIyndgCP/GIatl6dYiPSLbVvAhUDukCeqKAWhZ7EqcYCVrMoswyL9YOeJAWHR4eUCL2zYkHcnC58YZ+qErKSCWc=",
       "expect": false
     },
     {
       "case": "secp256r1 high-S",
       "address": "0xaf8a25b8923b42abaac0cc3d594583102ed122e6934a69bc3b6e93db36d0e9dc",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "AlbjqC3TD5uR0+MxXt3vfN4k2b3ceV9XvAVBMwgxlepxpazpa4J3THgw0bS2vSNI8qnBymt9i3lujKpDx9BrVEMDIJwxe2N5Nd09ocVPY0ld+zH5fSk98IVxAyBZXJqsuD8=",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "Anyye7JlQ7qQYANKEWpXboVixEqnM06zVN54HTem/0wSyyz6w87UB52AyZTnVfjPquJbDBROIqHcD1PqpfhmyjIDIJwxe2N5Nd09ocVPY0ld+zH5fSk98IVxAyBZXJqsuD8=",
       "expect": false
     },
     {
       "case": "ed25519 non-canonical s (s + L)",
       "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "AMbu0NHeMayTIgBqOim2lSCohB02rs8LiJA1vqLkE3qic8j/h5rcsqNaMdHKxAY6UB8lcs5+m/Aaed5H/CeBpBfqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "AHjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLCWQRVDx0bmuje7klM5DWQ2K20Jd8bHIuOxqIkrv36xjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
       "expect": false
     },
     {
       "case": "ed25519 wrong intent (TransactionData)",
       "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "AM1KNpa9zt8Q1fxsE+S0+UL1YD5wLUnQsAfHl2qCAa3zfmo4h42wvY8l/Aijnm4tGb7tVIVzhQEetyJpB0ye+gjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "AIbykdHmzZNJw8zVAkG38KfKlLh/7OycHBHVF8p3r26UTpD5iIArpOIzih5pLb8HAO48UEX17sw4ZG2GIFFxBQLqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
       "expect": false
     },
     {
       "case": "ed25519 truncated",
       "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "AMbu0NHeMayTIgBqOim2lSCohB02rs8LiJA1vqLkE3qihvQJK4B5oEuElNkn5gxbOx8lcs5+m/Aaed5H/CeBpAfqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbS",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "AHjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbS",
       "expect": false
     },
     {
       "case": "flag 0x03 multisig (fails closed)",
       "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "A8bu0NHeMayTIgBqOim2lSCohB02rs8LiJA1vqLkE3qihvQJK4B5oEuElNkn5gxbOx8lcs5+m/Aaed5H/CeBpAfqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "A3jXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
       "expect": false
     },
     {
       "case": "flag 0x05 zkLogin (fails closed)",
       "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "Bcbu0NHeMayTIgBqOim2lSCohB02rs8LiJA1vqLkE3qihvQJK4B5oEuElNkn5gxbOx8lcs5+m/Aaed5H/CeBpAfqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "BXjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
       "expect": false
     },
     {
       "case": "flag 0x06 passkey (fails closed)",
       "address": "0xa0ccc8bcc83f6c628340134f8546a21e0618fd1aaa02432bba454c4a2c2233da",
-      "nonce": "GOLDEN-NONCE-123",
-      "signature": "Bsbu0NHeMayTIgBqOim2lSCohB02rs8LiJA1vqLkE3qihvQJK4B5oEuElNkn5gxbOx8lcs5+m/Aaed5H/CeBpAfqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
+      "context": {
+        "origin": "https://gateway.example",
+        "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "network": "testnet",
+        "nonce": "GOLDEN-NONCE-123"
+      },
+      "signature": "BnjXWmJbnMY8ALZt75FJRfhbqzF/IYHVjRhaFZ0nG2hLHJAb9yERXBPN3sGCVJb3LmK20Jd8bHIuOxqIkrv36wjqSmxj4pxSCr71UHsTLsX5lUd2rr6+e5JCHuppFEbSLA==",
       "expect": false
     }
   ],
   "zip215": {
     "description": "ed25519 small-order public key (identity), R = identity, s = 0: valid under ZIP-215 (the rule Sui validators apply) for any message, invalid under strict RFC 8032.",
     "address": "0x6e02ac5b501ce6f9a0ef3cb7026073505ce6b755f014f64738483f63c5d1b5c7",
-    "nonce": "GOLDEN-NONCE-123",
+    "context": {
+      "origin": "https://gateway.example",
+      "gateId": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+      "network": "testnet",
+      "nonce": "GOLDEN-NONCE-123"
+    },
     "signature": "AAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
     "expect": true
   }

@@ -9,6 +9,10 @@
  */
 
 import type { Config } from './config.js'
+import { clientResponseHeaders, isSafePath, upstreamRequestHeaders } from './headers.js'
+
+/** Methods the gateway forwards; anything else is refused with 405 before any work is done. */
+export const FORWARDED_METHODS: readonly string[] = ['GET', 'HEAD', 'POST', 'PUT']
 
 /**
  * Build a JSON `{"error": reason}` response with the given status code.
@@ -67,9 +71,10 @@ export function limitBody(
 /**
  * Forward an authorised request to the configured upstream origin.
  *
- * Strips `Host`, `Authorization`, `X-Access-Proof`, and `Content-Length` from the request;
- * strips `Content-Length`, `Transfer-Encoding`, and `Connection` from the response.
+ * Header policy: see `headers.ts` (hop-by-hop in both directions, credentials, cookies, CORS).
  * Injects `cfg.upstreamAuthHeaders` on the upstream fetch (e.g. CF Access service-token headers).
+ * Redirects are never followed (the service-token headers must not follow a `Location`): an
+ * upstream 3xx is a 502. The whole exchange is bounded by `cfg.upstreamTimeoutMs` (504).
  * Returns 413 if the body exceeds `cfg.maxBodyBytes`: up front when `Content-Length` says so,
  * otherwise as soon as the streamed byte count crosses the cap (the upstream fetch is aborted).
  *
@@ -80,20 +85,23 @@ export function limitBody(
  */
 export async function forward(cfg: Config, request: Request): Promise<Response> {
   const url = new URL(request.url)
-  const pathAndQuery = url.pathname + url.search
-  const upstreamUrl = cfg.upstreamUrl + pathAndQuery
+  if (!isSafePath(url.pathname)) return errorResponse(400, 'invalid path')
+  const upstreamUrl = cfg.upstreamUrl + url.pathname + url.search
 
   // Size guard, two layers. Content-Length first: cheap, rejects a declared oversize body before
   // any upstream work. It is not sufficient on its own — a chunked body declares no length — so
   // the body is also streamed through a byte counter that aborts the upstream request past the
   // cap. Never buffer: 60+ MB encoded Walrus blobs would exhaust Worker memory.
   const method = request.method.toUpperCase()
+  if (!FORWARDED_METHODS.includes(method)) return errorResponse(405, 'method not allowed')
   const hasBody = method !== 'GET' && method !== 'HEAD'
   const cl = hasBody ? parseInt(request.headers.get('content-length') ?? '', 10) : NaN
   if (Number.isFinite(cl) && cl > cfg.maxBodyBytes) {
     return errorResponse(413, 'request body too large')
   }
   const abort = new AbortController()
+  const deadline = AbortSignal.timeout(cfg.upstreamTimeoutMs)
+  const signal = AbortSignal.any([abort.signal, deadline])
   let tooLarge = false
   let body: ReadableStream<Uint8Array> | null = null
   if (hasBody && request.body) {
@@ -106,16 +114,7 @@ export async function forward(cfg: Config, request: Request): Promise<Response> 
     if (Number.isFinite(cl) && cl >= 0) body = body.pipeThrough(new FixedLengthStream(cl))
   }
 
-  const headers = new Headers(request.headers)
-  headers.delete('host')
-  headers.delete('authorization')
-  headers.delete('x-access-proof')
-  headers.delete('content-length')
-
-  // Inject upstream auth headers (e.g. CF Access service token for the locked relay origin).
-  for (const { name, value } of cfg.upstreamAuthHeaders) {
-    headers.set(name, value)
-  }
+  const headers = upstreamRequestHeaders(request.headers, cfg.upstreamAuthHeaders)
 
   let upstream: Response
   try {
@@ -123,12 +122,15 @@ export async function forward(cfg: Config, request: Request): Promise<Response> 
       method: request.method,
       headers,
       body,
-      signal: abort.signal,
+      signal,
+      // Never follow: the Access service-token headers would be re-sent to the `Location` host.
+      redirect: 'manual',
       // @ts-expect-error — CF Workers supports streaming body via ReadableStream without 'duplex'
       duplex: 'half',
     })
   } catch {
-    return tooLarge ? errorResponse(413, 'request body too large') : errorResponse(502, 'upstream error')
+    if (tooLarge) return errorResponse(413, 'request body too large')
+    return deadline.aborted ? errorResponse(504, 'upstream timed out') : errorResponse(502, 'upstream error')
   }
   if (tooLarge) {
     // The upstream answered before the counter tripped (e.g. an early error status); the body it
@@ -136,11 +138,12 @@ export async function forward(cfg: Config, request: Request): Promise<Response> 
     return errorResponse(413, 'request body too large')
   }
 
-  // Strip hop-unsafe / recomputed headers from the response.
-  const outHeaders = new Headers(upstream.headers)
-  outHeaders.delete('content-length')
-  outHeaders.delete('transfer-encoding')
-  outHeaders.delete('connection')
+  // A relay has no business redirecting; treating a 3xx as an error also covers an Access login
+  // redirect after the service token expires. Nothing from the response is passed on.
+  if (upstream.status >= 300 && upstream.status < 400) {
+    await upstream.body?.cancel()
+    return errorResponse(502, 'upstream error')
+  }
 
-  return new Response(upstream.body, { status: upstream.status, headers: outHeaders })
+  return new Response(upstream.body, { status: upstream.status, headers: clientResponseHeaders(upstream.headers) })
 }

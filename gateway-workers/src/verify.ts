@@ -10,7 +10,7 @@ import { p256 } from '@noble/curves/nist.js'
 import type { Config } from './config.js'
 import type { NonceBackend } from './state/types.js'
 import { blake2b256, base64ToBytes, bytesToHex, concatBytes, uleb128 } from './crypto.js'
-import { personalMessageForNonce, decodeAccessProof } from './wire.js'
+import { personalMessage, decodeAccessProof, isTransactionDigest } from './wire.js'
 
 // Sui signature-scheme flag bytes (first byte of a serialized signature).
 const FLAG_ED25519 = 0x00
@@ -145,19 +145,22 @@ export interface ChainQuery {
   /**
    * True if `consumeDigest` names a successful transaction that emitted an event of exactly
    * `consumedEventType` (the configured access_gate package's `AccessConsumedEvent`) for `address`
-   * (the sender) on `gateId`. Not bound to the challenge nonce — single-use is enforced by the
-   * redemption store keying on the digest.
+   * (the sender) on `gateId`, no older than `maxAgeSecs`. Not bound to the challenge nonce —
+   * single-use is enforced by the redemption store keying on the digest. A digest the node does
+   * not know is `false` (denied); an RPC failure throws (`ChainError`).
    */
   consumeTxValid(
     consumeDigest: string,
     address: string,
     consumedEventType: string,
-    gateId?: string,
+    gateId: string | undefined,
+    maxAgeSecs: number,
   ): Promise<boolean>
   /**
    * True if `gateId` is paused AND its immutable `GatePolicy` has `pause_blocks_access` — holders
-   * must then be denied until the gate is unpaused. False for gates without that policy flag
-   * (including gates of package versions that predate policies).
+   * must then be denied until the gate is unpaused. Throws (→ `ChainError`, denied) if the gate's
+   * JSON is not the shape this version understands: a rendering change must never silently
+   * disable an admin's pause.
    */
   gateAccessBlocked(gateId: string): Promise<boolean>
 }
@@ -222,7 +225,17 @@ export async function verifyAccessRequest(
     return { ok: false, denied: 'BadProof' }
   }
 
-  const message = personalMessageForNonce(proof.nonce)
+  // Single-use gateways need the consume digest before anything else (it is part of the signed
+  // message), and ownership gateways build the message without one: a signature made for the other
+  // mode, another gateway, gate or network simply fails to verify.
+  if (cfg.singleUse && proof.consumeDigest === undefined) return { ok: false, denied: 'ConsumeMissing' }
+  const message = personalMessage({
+    origin: cfg.gatewayOrigin,
+    gateId: normalizeAddress(cfg.gateId),
+    network: cfg.network,
+    nonce: proof.nonce,
+    consumeDigest: cfg.singleUse ? proof.consumeDigest : undefined,
+  })
   if (!verifyPersonalMessageSignature(proof.address, message, proof.signature)) {
     return { ok: false, denied: 'BadSignature' }
   }
@@ -251,12 +264,19 @@ export async function verifyAccessRequest(
   if (blocked) return { ok: false, denied: 'GatePaused' }
 
   if (cfg.singleUse) {
-    if (proof.consumeDigest === undefined) {
+    // decodeAccessProof validated the digest's shape; the RPC call is only made for a plausible one.
+    if (proof.consumeDigest === undefined || !isTransactionDigest(proof.consumeDigest)) {
       return { ok: false, denied: 'ConsumeMissing' }
     }
     let ok: boolean
     try {
-      ok = await chain.consumeTxValid(proof.consumeDigest, address, consumedEventType(cfg.nftType), cfg.gateId)
+      ok = await chain.consumeTxValid(
+        proof.consumeDigest,
+        address,
+        consumedEventType(cfg.nftType),
+        cfg.gateId,
+        cfg.consumeMaxAgeSecs,
+      )
     } catch {
       return { ok: false, denied: 'ChainError' }
     }

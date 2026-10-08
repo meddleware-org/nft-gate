@@ -11,7 +11,7 @@
  */
 
 import { DurableObject } from 'cloudflare:workers'
-import type { LeaseResult, NonceBackend } from './types.js'
+import type { CommitResult, LeaseResult, NonceBackend, RedemptionStore } from './types.js'
 import { randomHex24, shardOfNonce } from './types.js'
 
 /** Fixed shard name for the redemption store (the `consumeDigest` carries no region tag). */
@@ -34,6 +34,7 @@ interface CountRow {
 interface RedemptionRow {
   state: string
   expiry: number
+  token: string | null
 }
 
 /**
@@ -59,10 +60,14 @@ export class NonceRateState extends DurableObject {
     )
     // Redemption store: `state` is 'leased' (an in-flight upload holds the consume) or 'committed'
     // (the use was spent on a successful upload). `expiry` is the lease deadline / committed
-    // retention deadline (unix ms).
+    // retention deadline (unix ms). `token` is the random owner of a lease: commit and release
+    // compare it, so a request whose lease lapsed cannot touch a newer holder's row.
     this.sql.exec(
-      'CREATE TABLE IF NOT EXISTS redemptions (key TEXT PRIMARY KEY, state TEXT NOT NULL, expiry INTEGER NOT NULL)',
+      'CREATE TABLE IF NOT EXISTS redemptions (key TEXT PRIMARY KEY, state TEXT NOT NULL, expiry INTEGER NOT NULL, token TEXT)',
     )
+    // Tables created before owner tokens existed lack the column; add it (idempotent).
+    const cols = this.sql.exec("PRAGMA table_info('redemptions')").toArray() as unknown as Array<{ name: string }>
+    if (!cols.some((c) => c.name === 'token')) this.sql.exec('ALTER TABLE redemptions ADD COLUMN token TEXT')
   }
 
   /** Store a fresh nonce with a hard entry cap (evict soonest-to-expire). Returns expiry ms. */
@@ -107,14 +112,17 @@ export class NonceRateState extends DurableObject {
       }
     }
     if (count >= maxPerMin) return false
+    // Windows older than a minute are dead weight: sweep them now and then so the table is bounded
+    // by the keys seen in the last minute rather than every key ever seen.
+    if (Math.random() < 0.02) this.sql.exec('DELETE FROM rate WHERE start < ?', now - 60000)
     this.sql.exec('INSERT OR REPLACE INTO rate (addr, start, count) VALUES (?, ?, ?)', addr, start, count + 1)
     return true
   }
 
   /**
    * Atomically claim `key` for an in-flight upload (single-threaded DO ⇒ no race). Returns
-   * `'redeemed'` if already committed, `'leased'` if an unexpired lease is held, else `'ok'`
-   * after taking a fresh lease. An expired lease (crashed request) is reclaimable as `'ok'`.
+   * `redeemed` if already committed, `leased` if an unexpired lease is held, else `ok` with the
+   * owner token of a fresh lease. An expired lease (crashed request) is reclaimable.
    */
   tryLeaseRedemption(key: string, leaseTtlSecs: number, maxEntries: number): LeaseResult {
     const now = Date.now()
@@ -122,12 +130,12 @@ export class NonceRateState extends DurableObject {
     this.sql.exec("DELETE FROM redemptions WHERE state = 'leased' AND expiry <= ?", now)
     this.sql.exec("DELETE FROM redemptions WHERE state = 'committed' AND expiry <= ?", now)
     const rows = this.sql
-      .exec('SELECT state, expiry FROM redemptions WHERE key = ?', key)
+      .exec('SELECT state, expiry, token FROM redemptions WHERE key = ?', key)
       .toArray() as unknown as RedemptionRow[]
     const [r] = rows
     if (r) {
-      if (r.state === 'committed') return 'redeemed'
-      if (r.state === 'leased' && Number(r.expiry) > now) return 'leased'
+      if (r.state === 'committed') return { status: 'redeemed' }
+      if (r.state === 'leased' && Number(r.expiry) > now) return { status: 'leased' }
       // else: an expired lease — fall through and re-lease.
     }
     const count = (this.sql.exec('SELECT COUNT(*) AS c FROM redemptions').one() as unknown as CountRow).c
@@ -137,31 +145,43 @@ export class NonceRateState extends DurableObject {
         "DELETE FROM redemptions WHERE key = (SELECT key FROM redemptions WHERE state = 'leased' ORDER BY expiry ASC LIMIT 1)",
       )
     }
+    const token = crypto.randomUUID()
     this.sql.exec(
-      "INSERT OR REPLACE INTO redemptions (key, state, expiry) VALUES (?, 'leased', ?)",
+      "INSERT OR REPLACE INTO redemptions (key, state, expiry, token) VALUES (?, 'leased', ?, ?)",
       key,
       now + leaseTtlSecs * 1000,
+      token,
+    )
+    return { status: 'ok', token }
+  }
+
+  /**
+   * Mark `key` redeemed (retained `retentionSecs`) iff `token` still owns an unexpired lease.
+   * A lapsed or foreign lease is left untouched and reported as `lost`.
+   */
+  commitRedemption(key: string, token: string, retentionSecs: number): CommitResult {
+    const now = Date.now()
+    const cur = this.sql
+      .exec("SELECT 1 AS x FROM redemptions WHERE key = ? AND state = 'leased' AND token = ? AND expiry > ?", key, token, now)
+      .toArray()
+    if (cur.length === 0) return 'lost'
+    this.sql.exec(
+      "UPDATE redemptions SET state = 'committed', expiry = ?, token = NULL WHERE key = ? AND state = 'leased' AND token = ?",
+      now + retentionSecs * 1000,
+      key,
+      token,
     )
     return 'ok'
   }
 
-  /** Permanently mark `key` redeemed (retained `retentionSecs`) — the use is spent. */
-  commitRedemption(key: string, retentionSecs: number): void {
-    this.sql.exec(
-      "INSERT OR REPLACE INTO redemptions (key, state, expiry) VALUES (?, 'committed', ?)",
-      key,
-      Date.now() + retentionSecs * 1000,
-    )
-  }
-
-  /** Release a lease on `key` (upload failed) so the consume can be retried immediately. */
-  releaseRedemption(key: string): void {
-    this.sql.exec("DELETE FROM redemptions WHERE key = ? AND state = 'leased'", key)
+  /** Release the lease on `key` iff `token` owns it, so the consume can be retried immediately. */
+  releaseRedemption(key: string, token: string): void {
+    this.sql.exec("DELETE FROM redemptions WHERE key = ? AND state = 'leased' AND token = ?", key, token)
   }
 }
 
 /** {@link NonceBackend} that fans out to per-region {@link NonceRateState} DO shards. */
-export class DurableObjectBackend implements NonceBackend {
+export class DurableObjectBackend implements NonceBackend, RedemptionStore {
   /**
    * @param ns - The Durable Object namespace binding for `NonceRateState`.
    * @param shardMode - `"region"` places each shard near its users; `"global"` uses one instance.
@@ -208,11 +228,11 @@ export class DurableObjectBackend implements NonceBackend {
     return this.stub(REDEEM_SHARD).tryLeaseRedemption(key, leaseTtlSecs, this.maxEntries)
   }
 
-  async commitRedemption(key: string, retentionSecs: number): Promise<void> {
-    await this.stub(REDEEM_SHARD).commitRedemption(key, retentionSecs)
+  async commitRedemption(key: string, token: string, retentionSecs: number): Promise<CommitResult> {
+    return this.stub(REDEEM_SHARD).commitRedemption(key, token, retentionSecs)
   }
 
-  async releaseRedemption(key: string): Promise<void> {
-    await this.stub(REDEEM_SHARD).releaseRedemption(key)
+  async releaseRedemption(key: string, token: string): Promise<void> {
+    await this.stub(REDEEM_SHARD).releaseRedemption(key, token)
   }
 }

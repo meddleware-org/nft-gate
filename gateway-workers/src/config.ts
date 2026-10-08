@@ -10,10 +10,20 @@
  * and `UPSTREAM_AUTH_HEADERS` are shared with the Rust gateway in the same formats.
  */
 
+import { gatewayOrigin as gatewayOriginOf } from '@meddleware/nft-gate-client'
+
 export interface Env {
   // ── config (parity with the Rust gateway) ─────────────────────────────────
   UPSTREAM_URL: string
   SUI_RPC_URL: string
+  /**
+   * The canonical public origin of THIS gateway (`https://host`, no path, lower-case). It is signed
+   * into every access proof (protocol `nft-gate:access:v2`), so a proof made for another gateway is
+   * useless here.
+   */
+  GATEWAY_ORIGIN: string
+  /** `localnet` | `devnet` | `testnet` | `mainnet`: signed into every access proof. */
+  NETWORK: string
   NFT_TYPE: string
   GATE_ID?: string
   SINGLE_USE?: string
@@ -26,6 +36,17 @@ export interface Env {
   MAX_BODY_BYTES?: string
   CHALLENGE_TTL_SECS?: string
   OWNERSHIP_CACHE_TTL_MS?: string
+  /**
+   * Total deadline (seconds) for one upstream exchange, request body and response included. The
+   * redemption lease must outlive it, so a lease cannot lapse mid-forward (checked at startup).
+   */
+  UPSTREAM_TIMEOUT_SECS?: string
+  /** Per-call deadline (seconds) for Sui RPC reads. */
+  RPC_TIMEOUT_SECS?: string
+  /** Per-client-IP budget per minute for gated requests, checked BEFORE signature verification. */
+  GATED_PREAUTH_RATE_LIMIT_PER_MIN?: string
+  /** Single-use: oldest consume (seconds since its event) the gateway accepts; ≤ the retention. */
+  CONSUME_MAX_AGE_SECS?: string
   /** Single-use: seconds a consume-digest redemption lease is held during an in-flight upload. */
   REDEMPTION_LEASE_TTL_SECS?: string
   /** Single-use: seconds a committed (spent) consume-digest is remembered to block re-redemption. */
@@ -55,7 +76,7 @@ export interface Env {
   /**
    * Comma-separated list of browser origins allowed to make cross-origin requests.
    * Only origins in this list receive an `Access-Control-Allow-Origin` header.
-   * Defaults to the two Meddleware app origins when absent (the same list as wrangler.toml).
+   * Defaults to NONE (no cross-origin access). Each entry must be a canonical origin.
    * Example: `"https://sui-walrus.meddleware.co.uk,https://dash.meddleware.co.uk,https://sui-token-deployer.meddleware.co.uk"`
    */
   ALLOWED_ORIGINS?: string
@@ -76,6 +97,9 @@ export type NonceShardMode = 'region' | 'global'
 export interface Config {
   upstreamUrl: string
   suiRpcUrl: string
+  /** Canonical origin signed into access proofs. */
+  gatewayOrigin: string
+  network: SuiNetwork
   suiRpcAuthHeader?: { name: string; value: string }
   /** Headers injected into every upstream relay request (e.g. CF Access service token). */
   upstreamAuthHeaders: Array<{ name: string; value: string }>
@@ -93,6 +117,14 @@ export interface Config {
   /** Edge-cache TTL (s) for cacheable GET responses on public paths. 0 disables caching. */
   publicCacheTtlSecs: number
   maxBodyBytes: number
+  /** Total deadline (ms) for one upstream exchange. */
+  upstreamTimeoutMs: number
+  /** Per-call deadline (ms) for Sui RPC reads. */
+  rpcTimeoutMs: number
+  /** Per-client-IP cap per minute on gated requests, before verification (0 disables). */
+  gatedPreauthRateLimitPerMin: number
+  /** Oldest accepted consume, in seconds since its event. */
+  consumeMaxAgeSecs: number
   ownershipCacheTtlMs: number
   /** Single-use: lease TTL (s) for an in-flight consume-digest redemption. */
   redemptionLeaseTtlSecs: number
@@ -114,32 +146,98 @@ function req(env: Env, key: keyof Env): string {
   return v
 }
 
-function numOr(v: string | undefined, dflt: number): number {
-  if (v === undefined) return dflt
-  const n = Number(v)
-  return Number.isFinite(n) ? n : dflt
+/** An integer env var in `[min, max]`; anything else (a typo, a negative, a fraction) fails startup. */
+function int(env: Env, key: keyof Env, dflt: number, min: number, max: number): number {
+  const raw = env[key]
+  if (raw === undefined) return dflt
+  if (typeof raw !== 'string' || !/^\d{1,15}$/.test(raw.trim())) {
+    throw new Error(`${key} must be an integer in [${min}, ${max}]`)
+  }
+  const n = Number(raw.trim())
+  if (n < min || n > max) throw new Error(`${key} must be an integer in [${min}, ${max}]`)
+  return n
 }
 
+/** A boolean env var: exactly `true` or `false`; anything else fails startup rather than picking a mode. */
+function bool(env: Env, key: keyof Env, dflt: boolean): boolean {
+  const raw = env[key]
+  if (raw === undefined) return dflt
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  throw new Error(`${key} must be "true" or "false"`)
+}
+
+/** One of `allowed` (case-sensitive). */
+function oneOf<T extends string>(env: Env, key: keyof Env, dflt: T, allowed: readonly T[]): T {
+  const raw = env[key]
+  if (raw === undefined) return dflt
+  if (typeof raw === 'string' && (allowed as readonly string[]).includes(raw)) return raw as T
+  throw new Error(`${key} must be one of ${allowed.join(', ')}`)
+}
+
+const NETWORKS = ['localnet', 'devnet', 'testnet', 'mainnet'] as const
+export type SuiNetwork = (typeof NETWORKS)[number]
+
+/** A URL that must be https (http only for a loopback host), without credentials. */
+function httpsUrl(key: string, v: string): URL {
+  let url: URL
+  try {
+    url = new URL(v)
+  } catch {
+    throw new Error(`${key} must be an https URL`)
+  }
+  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) throw new Error(`${key} must be an https URL`)
+  if (url.username || url.password) throw new Error(`${key} must not carry credentials`)
+  return url
+}
+
+/**
+ * Parse `SUI_RPC_AUTH_HEADER`: `Name: value`. A bare value is refused (it used to be sent as
+ * `Authorization`, a guess an operator could not see), as is a bad header name or a CR/LF.
+ */
 function parseAuthHeader(v: string | undefined): { name: string; value: string } | undefined {
   if (!v) return undefined
   const idx = v.indexOf(':')
-  // "Name: value" → {name, value}; a bare value defaults to an Authorization header.
-  if (idx > 0) return { name: v.slice(0, idx).trim(), value: v.slice(idx + 1).trim() }
-  return { name: 'Authorization', value: v.trim() }
+  const name = idx > 0 ? v.slice(0, idx).trim() : ''
+  const value = idx > 0 ? v.slice(idx + 1).trim() : ''
+  if (!HEADER_NAME_RE.test(name) || value === '' || /[\r\n]/.test(value)) {
+    throw new Error('SUI_RPC_AUTH_HEADER must be "Name: value"')
+  }
+  return { name, value }
 }
 
-const DEFAULT_ALLOWED_ORIGINS = [
-  'https://sui-walrus.meddleware.co.uk',
-  'https://dash.meddleware.co.uk',
-  'https://sui-token-deployer.meddleware.co.uk',
-]
-
+/** `ALLOWED_ORIGINS`: comma-separated canonical origins; empty or unset allows no cross-origin access. */
 function parseAllowedOrigins(v: string | undefined): string[] {
-  if (!v || v.trim().length === 0) return DEFAULT_ALLOWED_ORIGINS
+  if (!v || v.trim().length === 0) return []
   return v
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0)
+    .map((o) => {
+      let origin: string
+      try {
+        origin = httpsUrl('ALLOWED_ORIGINS', o).origin
+      } catch {
+        throw new Error(`ALLOWED_ORIGINS entry is not an https origin: ${o}`)
+      }
+      if (origin !== o) throw new Error(`ALLOWED_ORIGINS entry is not a canonical origin: ${o}`)
+      return o
+    })
+}
+
+/** `PUBLIC_PATHS`: exact paths, each starting with `/` and free of query, fragment and dot segments. */
+function parsePublicPaths(v: string | undefined): string[] {
+  return (v ?? '/v1/tip-config')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map((p) => {
+      if (!/^\/[A-Za-z0-9._~\-/]*$/.test(p) || p.split('/').some((seg) => seg === '..' || seg === '.')) {
+        throw new Error(`PUBLIC_PATHS entry is not a plain absolute path: ${p}`)
+      }
+      return p
+    })
 }
 
 /** An HTTP header field name (RFC 9110 token). */
@@ -189,41 +287,74 @@ export function loadConfig(env: Env): Config {
   const gateId = req(env, 'GATE_ID').trim()
   if (!OBJECT_ID_RE.test(gateId)) throw new Error('GATE_ID must be a 0x-prefixed object ID')
 
-  const backendRaw = (env.NONCE_BACKEND ?? 'durable-object').toLowerCase()
-  const nonceBackend: NonceBackendKind = backendRaw === 'kv' ? 'kv' : 'durable-object'
-  const shardRaw = (env.NONCE_SHARD ?? 'region').toLowerCase()
-  const nonceShard: NonceShardMode = shardRaw === 'global' ? 'global' : 'region'
+  let gatewayOrigin: string
+  try {
+    gatewayOrigin = gatewayOriginOf(req(env, 'GATEWAY_ORIGIN').trim())
+  } catch {
+    throw new Error('GATEWAY_ORIGIN must be a canonical https origin (https://host, no path)')
+  }
+  if (gatewayOrigin !== req(env, 'GATEWAY_ORIGIN').trim()) {
+    throw new Error('GATEWAY_ORIGIN must be a canonical https origin (https://host, no path)')
+  }
+  const network = req(env, 'NETWORK').trim() as SuiNetwork
+  if (!NETWORKS.includes(network)) throw new Error(`NETWORK must be one of ${NETWORKS.join(', ')}`)
+
+  const upstream = httpsUrl('UPSTREAM_URL', req(env, 'UPSTREAM_URL'))
+  if (upstream.origin === gatewayOrigin) throw new Error('UPSTREAM_URL must not be this gateway (request loop)')
+  const rpc = httpsUrl('SUI_RPC_URL', req(env, 'SUI_RPC_URL'))
+
+  const singleUse = bool(env, 'SINGLE_USE', false)
+  const nonceBackend = oneOf<NonceBackendKind>(env, 'NONCE_BACKEND', 'durable-object', ['durable-object', 'kv'])
+  if (singleUse && nonceBackend === 'kv') {
+    // Workers KV is eventually consistent and its lease is read-then-write, so it cannot give the
+    // "redeemed exactly once" guarantee the single-use paywall rests on.
+    throw new Error('SINGLE_USE=true requires NONCE_BACKEND=durable-object')
+  }
+
+  const upstreamTimeoutSecs = int(env, 'UPSTREAM_TIMEOUT_SECS', 600, 1, 3600)
+  const leaseTtlSecs = int(env, 'REDEMPTION_LEASE_TTL_SECS', 900, 30, 86400)
+  if (leaseTtlSecs <= upstreamTimeoutSecs) {
+    throw new Error('REDEMPTION_LEASE_TTL_SECS must exceed UPSTREAM_TIMEOUT_SECS (a lease must outlive its upload)')
+  }
+  const retentionSecs = int(env, 'REDEMPTION_RETENTION_SECS', 2592000, 3600, 31536000)
+  const consumeMaxAgeSecs = int(env, 'CONSUME_MAX_AGE_SECS', 432000, 60, 31536000)
+  if (consumeMaxAgeSecs > retentionSecs) {
+    throw new Error('CONSUME_MAX_AGE_SECS must not exceed REDEMPTION_RETENTION_SECS (a spent consume must be remembered while it can be presented)')
+  }
 
   return {
     upstreamUrl: req(env, 'UPSTREAM_URL').replace(/\/+$/, ''),
-    suiRpcUrl: req(env, 'SUI_RPC_URL'),
+    suiRpcUrl: rpc.toString(),
+    gatewayOrigin,
+    network,
     suiRpcAuthHeader: parseAuthHeader(env.SUI_RPC_AUTH_HEADER),
     upstreamAuthHeaders: parseUpstreamAuthHeaders(env.UPSTREAM_AUTH_HEADERS),
     nftType,
     gateId,
-    challengeTtlSecs: numOr(env.CHALLENGE_TTL_SECS, 300),
-    singleUse: (env.SINGLE_USE ?? 'false').toLowerCase() === 'true',
-    publicPaths: (env.PUBLIC_PATHS ?? '/v1/tip-config')
-      .split(',')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0),
-    rateLimitPerMin: numOr(env.RATE_LIMIT_PER_MIN, 30),
-    challengeRateLimitPerMin: numOr(env.CHALLENGE_RATE_LIMIT_PER_MIN, 30),
-    publicRateLimitPerMin: numOr(env.PUBLIC_RATE_LIMIT_PER_MIN, 120),
-    publicCacheTtlSecs: numOr(env.PUBLIC_CACHE_TTL_SECS, 60),
-    maxBodyBytes: numOr(env.MAX_BODY_BYTES, 262144),
-    ownershipCacheTtlMs: numOr(env.OWNERSHIP_CACHE_TTL_MS, 0),
-    redemptionLeaseTtlSecs: numOr(env.REDEMPTION_LEASE_TTL_SECS, 120),
-    redemptionRetentionSecs: numOr(env.REDEMPTION_RETENTION_SECS, 2592000),
+    challengeTtlSecs: int(env, 'CHALLENGE_TTL_SECS', 300, 10, 3600),
+    singleUse,
+    publicPaths: parsePublicPaths(env.PUBLIC_PATHS),
+    rateLimitPerMin: int(env, 'RATE_LIMIT_PER_MIN', 30, 0, 1_000_000),
+    challengeRateLimitPerMin: int(env, 'CHALLENGE_RATE_LIMIT_PER_MIN', 30, 0, 1_000_000),
+    publicRateLimitPerMin: int(env, 'PUBLIC_RATE_LIMIT_PER_MIN', 120, 0, 1_000_000),
+    publicCacheTtlSecs: int(env, 'PUBLIC_CACHE_TTL_SECS', 60, 0, 86400),
+    maxBodyBytes: int(env, 'MAX_BODY_BYTES', 262144, 1, 1_073_741_824),
+    upstreamTimeoutMs: upstreamTimeoutSecs * 1000,
+    rpcTimeoutMs: int(env, 'RPC_TIMEOUT_SECS', 15, 1, 120) * 1000,
+    gatedPreauthRateLimitPerMin: int(env, 'GATED_PREAUTH_RATE_LIMIT_PER_MIN', 120, 0, 1_000_000),
+    consumeMaxAgeSecs,
+    ownershipCacheTtlMs: int(env, 'OWNERSHIP_CACHE_TTL_MS', 0, 0, 3_600_000),
+    redemptionLeaseTtlSecs: leaseTtlSecs,
+    redemptionRetentionSecs: retentionSecs,
     nonceBackend,
-    nonceShard,
-    nonceMaxEntries: numOr(env.NONCE_MAX_ENTRIES, 1000000),
-    quotaGuardEnabled: (env.QUOTA_GUARD_ENABLED ?? 'false').toLowerCase() === 'true',
+    nonceShard: oneOf<NonceShardMode>(env, 'NONCE_SHARD', 'region', ['region', 'global']),
+    nonceMaxEntries: int(env, 'NONCE_MAX_ENTRIES', 1000000, 1, 100_000_000),
+    quotaGuardEnabled: bool(env, 'QUOTA_GUARD_ENABLED', false),
     allowedOrigins: parseAllowedOrigins(env.ALLOWED_ORIGINS),
   }
 }
 
-/** Returns `true` if `path` is in the configured public-paths list (proxied without auth). */
+/** Returns `true` if `path` is in the configured public-paths list (proxied without auth, GET/HEAD only). */
 export function isPublicPath(cfg: Config, path: string): boolean {
   return cfg.publicPaths.some((p) => p === path)
 }

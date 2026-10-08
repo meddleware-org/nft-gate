@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.19] - 2026-10-08
+
+Parity with `gateway-workers` 0.0.19 (one version for every artifact). Still undeployed.
+
+### Changed (breaking: protocol v2, configuration)
+
+- Audience-bound proofs (`nft-gate:access:v2`; new required `GATEWAY_ORIGIN` and `NETWORK`), the
+  strict token grammar, owner-bound redemption leases (Redis Lua compare-and-set), `SINGLE_USE`
+  requiring `REDIS_URL` (or `ALLOW_VOLATILE_REDEMPTIONS`), store errors as `503`, `409` conflicts with
+  `code`, consume age bound, usable-pass ownership, strict gate JSON, not-found-only retries with
+  digest validation, strict configuration, the same header/redirect/method/path policy, a per-IP
+  budget before verification, IPv6 /64 keys, a bounded ownership cache, Bearer parsing like the
+  Workers gateway (any case, any whitespace). `UPSTREAM_TIMEOUT_SECS` defaults to 600 (`504`) and
+  `REDEMPTION_LEASE_TTL_SECS` to 900; Sui RPC calls have `RPC_TIMEOUT_SECS`.
+- Connection limits: a header read timeout, a body read timeout, `MAX_CONNECTIONS`, and a bounded
+  graceful shutdown (`SHUTDOWN_GRACE_SECS`), via a hyper accept loop in place of `axum::serve`.
+- Scoped to small-body upstreams (bodies are buffered); see the README.
+
 ## [0.0.17] - 2026-10-02
 
 ### Added

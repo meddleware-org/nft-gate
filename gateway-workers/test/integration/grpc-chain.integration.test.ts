@@ -27,7 +27,7 @@ describe.skipIf(!ENABLED)('SuiGrpc live gRPC integration (GRPC_TESTNET=1)', () =
   let chain: SuiGrpc
 
   beforeAll(() => {
-    chain = new SuiGrpc(RPC_URL, 0)
+    chain = new SuiGrpc(RPC_URL, 'testnet', { cacheTtlMs: 0, timeoutMs: 15_000 })
   })
 
   it('ownsNft resolves without throwing for a known address + NFT type', async () => {

@@ -9,7 +9,10 @@
 //!   nonce consumption is fleet-wide and replay protection survives horizontal scale-out
 //!   (gateway audit F2). Single-use is atomic via `GETDEL`; expiry is the key TTL.
 //!
-//! Both fail **closed**: on any backend error, `take_if_valid` returns `false`.
+//! Both fail **closed**: a backend error is an `Err` the router answers `503` (never a business
+//! conflict, never an implicit success). Redemptions are owner-bound: the lease returns a random
+//! token, and commit/release are compare-and-set on it, so a request whose lease lapsed can never
+//! clear or overwrite a newer holder's.
 
 use rand_core::{OsRng, RngCore};
 use std::collections::HashMap;
@@ -38,12 +41,20 @@ fn random_nonce() -> String {
 /// upload `release`s the lease so the consume stays redeemable.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Lease {
-    /// The caller holds the lease and must `commit`/`release` it.
-    Ok,
+    /// The caller holds the lease (identified by this owner token) and must `commit`/`release` it.
+    Ok(String),
     /// Another in-flight request holds an unexpired lease (concurrent duplicate).
     Leased,
     /// The digest was already committed — the use is spent.
     Redeemed,
+}
+
+/// Outcome of a commit: `Ok` — recorded as spent by the lease holder; `Lost` — the lease had
+/// lapsed or belongs to another request, so nothing changed (the caller must not report success).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Commit {
+    Ok,
+    Lost,
 }
 
 // ── In-memory backend ────────────────────────────────────────────────────────────
@@ -62,6 +73,8 @@ struct Redemption {
     committed: bool,
     /// Lease deadline (leased) or retention deadline (committed), monotonic.
     expiry: Instant,
+    /// Owner token of a lease (empty once committed).
+    token: String,
 }
 
 /// Process-local nonce store backed by a `Mutex<HashMap>`.
@@ -112,32 +125,38 @@ impl InMemoryNonceStore {
                 m.remove(&oldest);
             }
         }
+        let token = random_nonce();
         m.insert(
             key.to_string(),
             Redemption {
                 committed: false,
                 expiry: now + Duration::from_secs(lease_ttl_secs),
+                token: token.clone(),
             },
         );
-        Lease::Ok
+        Lease::Ok(token)
     }
 
-    /// Permanently mark `key` redeemed (retained `retention_secs`) — the use is spent.
-    fn commit_redemption(&self, key: &str, retention_secs: u64) -> anyhow::Result<()> {
-        self.redemptions.lock().unwrap().insert(
-            key.to_string(),
-            Redemption {
-                committed: true,
-                expiry: Instant::now() + Duration::from_secs(retention_secs),
-            },
-        );
-        Ok(())
-    }
-
-    /// Release a lease on `key` (upload failed) so the consume can be retried. Never clears a commit.
-    fn release_redemption(&self, key: &str) {
+    /// Mark `key` redeemed (retained `retention_secs`) iff `token` still owns an unexpired lease.
+    fn commit_redemption(&self, key: &str, token: &str, retention_secs: u64) -> Commit {
+        let now = Instant::now();
         let mut m = self.redemptions.lock().unwrap();
-        if m.get(key).map(|r| !r.committed).unwrap_or(false) {
+        match m.get_mut(key) {
+            Some(r) if !r.committed && r.token == token && r.expiry > now => {
+                r.committed = true;
+                r.expiry = now + Duration::from_secs(retention_secs);
+                r.token.clear();
+                Commit::Ok
+            }
+            _ => Commit::Lost,
+        }
+    }
+
+    /// Release the lease on `key` iff `token` owns it (upload failed). Never clears a commit or a
+    /// newer holder's lease.
+    fn release_redemption(&self, key: &str, token: &str) {
+        let mut m = self.redemptions.lock().unwrap();
+        if m.get(key).is_some_and(|r| !r.committed && r.token == token) {
             m.remove(key);
         }
     }
@@ -258,62 +277,73 @@ impl RedisNonceStore {
         format!("nftgate:redeem:{key}")
     }
 
-    /// Atomically claim `key` via `SET NX PX`. On a pre-existing key, distinguish a committed
-    /// (redeemed) digest from an active lease. Eventually consistent (see the nonce caveat); a
-    /// Redis error fails closed as a conflict so a use is never double-spent on a backend blip.
-    async fn try_lease_redemption(&self, key: &str, lease_ttl_secs: u64) -> Lease {
+    /// Atomically claim `key` via `SET NX PX` with an owner token (`leased:<token>`). On a
+    /// pre-existing key, distinguish a committed (redeemed) digest from an active lease. A Redis
+    /// error is an `Err` (answered 503), not a conflict.
+    async fn try_lease_redemption(&self, key: &str, lease_ttl_secs: u64) -> anyhow::Result<Lease> {
         let mut c = self.conn.clone();
         let k = self.redeem_key(key);
-        let set: redis::RedisResult<Option<String>> = redis::cmd("SET")
+        let token = random_nonce();
+        let set: Option<String> = redis::cmd("SET")
             .arg(&k)
-            .arg("leased")
+            .arg(format!("leased:{token}"))
             .arg("NX")
             .arg("PX")
             .arg(lease_ttl_secs.saturating_mul(1000))
             .query_async(&mut c)
-            .await;
-        match set {
-            Ok(Some(_)) => Lease::Ok, // claimed the lease
-            Ok(None) => {
-                // Key already present: committed (spent) or an unexpired lease.
-                match redis::cmd("GET")
-                    .arg(&k)
-                    .query_async::<Option<String>>(&mut c)
-                    .await
-                {
-                    Ok(Some(v)) if v == "committed" => Lease::Redeemed,
-                    _ => Lease::Leased,
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "redis redemption SET failed; failing closed as conflict");
-                Lease::Leased
-            }
-        }
-    }
-
-    /// Permanently mark `key` redeemed, retained `retention_secs`.
-    async fn commit_redemption(&self, key: &str, retention_secs: u64) -> anyhow::Result<()> {
-        let mut c = self.conn.clone();
-        redis::cmd("SET")
-            .arg(self.redeem_key(key))
-            .arg("committed")
-            .arg("PX")
-            .arg(retention_secs.saturating_mul(1000))
-            .query_async::<()>(&mut c)
             .await
-            .map_err(|e| anyhow::anyhow!("redis redemption commit failed: {e}"))
+            .map_err(|e| anyhow::anyhow!("redis redemption SET failed: {e}"))?;
+        if set.is_some() {
+            return Ok(Lease::Ok(token)); // claimed the lease
+        }
+        // Key already present: committed (spent) or an unexpired lease.
+        let cur: Option<String> = redis::cmd("GET")
+            .arg(&k)
+            .query_async(&mut c)
+            .await
+            .map_err(|e| anyhow::anyhow!("redis redemption GET failed: {e}"))?;
+        Ok(match cur.as_deref() {
+            Some("committed") => Lease::Redeemed,
+            _ => Lease::Leased,
+        })
     }
 
-    /// Release a lease on `key` (never a commit). A compare-and-delete in one Lua script, so a
-    /// commit landing between a separate GET and DEL can never be erased.
-    async fn release_redemption(&self, key: &str) {
+    /// Compare-and-set: mark `key` redeemed (retained `retention_secs`) iff it still holds this
+    /// token's lease, in one Lua script.
+    async fn commit_redemption(
+        &self,
+        key: &str,
+        token: &str,
+        retention_secs: u64,
+    ) -> anyhow::Result<Commit> {
         let mut c = self.conn.clone();
         let script = redis::Script::new(
-            "if redis.call('GET', KEYS[1]) == 'leased' then return redis.call('DEL', KEYS[1]) else return 0 end",
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then \
+               redis.call('SET', KEYS[1], 'committed', 'PX', ARGV[2]); return 1 \
+             else return 0 end",
         );
-        let res: redis::RedisResult<i64> =
-            script.key(self.redeem_key(key)).invoke_async(&mut c).await;
+        let ok: i64 = script
+            .key(self.redeem_key(key))
+            .arg(format!("leased:{token}"))
+            .arg(retention_secs.saturating_mul(1000))
+            .invoke_async(&mut c)
+            .await
+            .map_err(|e| anyhow::anyhow!("redis redemption commit failed: {e}"))?;
+        Ok(if ok == 1 { Commit::Ok } else { Commit::Lost })
+    }
+
+    /// Compare-and-delete: release the lease iff it is still this token's (never a commit, never a
+    /// newer holder's), in one Lua script.
+    async fn release_redemption(&self, key: &str, token: &str) {
+        let mut c = self.conn.clone();
+        let script = redis::Script::new(
+            "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+        );
+        let res: redis::RedisResult<i64> = script
+            .key(self.redeem_key(key))
+            .arg(format!("leased:{token}"))
+            .invoke_async(&mut c)
+            .await;
         if let Err(e) = res {
             // The lease still self-expires after REDEMPTION_LEASE_TTL_SECS.
             tracing::warn!(error = %e, "redis redemption release failed; lease will expire");
@@ -336,9 +366,9 @@ impl RedisNonceStore {
         Ok((nonce, now_ms() + self.ttl_ms))
     }
 
-    /// Atomically consume `nonce` via `GETDEL` (Redis ≥6.2 / Dragonfly). Returns `false` on a
-    /// missing/expired key or a Redis error (fails closed).
-    async fn take_if_valid(&self, nonce: &str) -> bool {
+    /// Atomically consume `nonce` via `GETDEL` (Redis ≥6.2 / Dragonfly). `Ok(false)` for a
+    /// missing/expired key; a Redis error is an `Err` (answered 503, fails closed).
+    async fn take_if_valid(&self, nonce: &str) -> anyhow::Result<bool> {
         let mut c = self.conn.clone();
         // GETDEL is atomic: returns the value and deletes the key in one step, so a nonce is
         // consumed exactly once fleet-wide; a missing/expired key returns nil.
@@ -347,12 +377,9 @@ impl RedisNonceStore {
             .query_async(&mut c)
             .await;
         match res {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
-            Err(e) => {
-                tracing::warn!(error = %e, "redis nonce GETDEL failed; failing closed");
-                false
-            }
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => Ok(false),
+            Err(e) => Err(anyhow::anyhow!("redis nonce GETDEL failed: {e}")),
         }
     }
 }
@@ -392,10 +419,11 @@ impl NonceStore {
         }
     }
 
-    /// Consume a nonce exactly once; true iff it was valid, unexpired, and unused.
-    pub async fn take_if_valid(&self, nonce: &str) -> bool {
+    /// Consume a nonce exactly once; `Ok(true)` iff it was valid, unexpired, and unused. `Err` when
+    /// the shared store cannot answer.
+    pub async fn take_if_valid(&self, nonce: &str) -> anyhow::Result<bool> {
         match self {
-            NonceStore::InMemory(s) => s.take_if_valid(nonce),
+            NonceStore::InMemory(s) => Ok(s.take_if_valid(nonce)),
             NonceStore::Redis(s) => s.take_if_valid(nonce).await,
         }
     }
@@ -408,26 +436,35 @@ impl NonceStore {
     }
 
     /// Single-use redemption: atomically claim a consume digest for an in-flight upload.
-    pub async fn try_lease_redemption(&self, key: &str, lease_ttl_secs: u64) -> Lease {
+    pub async fn try_lease_redemption(
+        &self,
+        key: &str,
+        lease_ttl_secs: u64,
+    ) -> anyhow::Result<Lease> {
         match self {
-            NonceStore::InMemory(s) => s.try_lease_redemption(key, lease_ttl_secs),
+            NonceStore::InMemory(s) => Ok(s.try_lease_redemption(key, lease_ttl_secs)),
             NonceStore::Redis(s) => s.try_lease_redemption(key, lease_ttl_secs).await,
         }
     }
 
-    /// Permanently mark a consume digest redeemed (after a successful upload).
-    pub async fn commit_redemption(&self, key: &str, retention_secs: u64) -> anyhow::Result<()> {
+    /// Mark a consume digest redeemed (after a successful upload) iff `token` still owns the lease.
+    pub async fn commit_redemption(
+        &self,
+        key: &str,
+        token: &str,
+        retention_secs: u64,
+    ) -> anyhow::Result<Commit> {
         match self {
-            NonceStore::InMemory(s) => s.commit_redemption(key, retention_secs),
-            NonceStore::Redis(s) => s.commit_redemption(key, retention_secs).await,
+            NonceStore::InMemory(s) => Ok(s.commit_redemption(key, token, retention_secs)),
+            NonceStore::Redis(s) => s.commit_redemption(key, token, retention_secs).await,
         }
     }
 
-    /// Release a redemption lease (after a failed upload) so the consume can be retried.
-    pub async fn release_redemption(&self, key: &str) {
+    /// Release a redemption lease (after a failed upload) iff `token` still owns it.
+    pub async fn release_redemption(&self, key: &str, token: &str) {
         match self {
-            NonceStore::InMemory(s) => s.release_redemption(key),
-            NonceStore::Redis(s) => s.release_redemption(key).await,
+            NonceStore::InMemory(s) => s.release_redemption(key, token),
+            NonceStore::Redis(s) => s.release_redemption(key, token).await,
         }
     }
 
@@ -445,25 +482,35 @@ impl NonceStore {
 mod tests {
     use super::*;
 
+    fn store() -> NonceStore {
+        NonceStore::in_memory(300, 10_000)
+    }
+
+    async fn lease(s: &NonceStore, key: &str, ttl: u64) -> String {
+        match s.try_lease_redemption(key, ttl).await.unwrap() {
+            Lease::Ok(t) => t,
+            other => panic!("expected a lease, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn nonce_valid_once_then_used() {
-        let store = NonceStore::in_memory(300, 10_000);
+        let store = store();
         let (nonce, _) = store.issue().await.unwrap();
-        assert!(store.take_if_valid(&nonce).await);
-        assert!(!store.take_if_valid(&nonce).await); // already used
+        assert!(store.take_if_valid(&nonce).await.unwrap());
+        assert!(!store.take_if_valid(&nonce).await.unwrap()); // already used
     }
 
     #[tokio::test]
     async fn unknown_nonce_rejected() {
-        let store = NonceStore::in_memory(300, 10_000);
-        assert!(!store.take_if_valid("never-issued").await);
+        assert!(!store().take_if_valid("never-issued").await.unwrap());
     }
 
     #[tokio::test]
     async fn expired_nonce_rejected() {
         let store = NonceStore::in_memory(0, 10_000); // immediate expiry
         let (nonce, _) = store.issue().await.unwrap();
-        assert!(!store.take_if_valid(&nonce).await);
+        assert!(!store.take_if_valid(&nonce).await.unwrap());
     }
 
     #[tokio::test]
@@ -489,48 +536,93 @@ mod tests {
 
     #[tokio::test]
     async fn redemption_lease_commit_blocks_reuse() {
-        let store = NonceStore::in_memory(300, 10_000);
-        assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Ok);
+        let store = store();
+        let token = lease(&store, "0xd", 120).await;
         // A concurrent duplicate sees the active lease.
-        assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Leased);
-        store.commit_redemption("0xd", 3600).await.unwrap();
+        assert_eq!(
+            store.try_lease_redemption("0xd", 120).await.unwrap(),
+            Lease::Leased
+        );
+        assert_eq!(
+            store.commit_redemption("0xd", &token, 3600).await.unwrap(),
+            Commit::Ok
+        );
         // Once committed, it can never be re-leased.
         assert_eq!(
-            store.try_lease_redemption("0xd", 120).await,
+            store.try_lease_redemption("0xd", 120).await.unwrap(),
             Lease::Redeemed
         );
     }
 
     #[tokio::test]
     async fn redemption_release_allows_retry() {
-        let store = NonceStore::in_memory(300, 10_000);
-        assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Ok);
-        store.release_redemption("0xd").await; // upload failed
-        assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Ok); // retry with same consume
+        let store = store();
+        let token = lease(&store, "0xd", 120).await;
+        store.release_redemption("0xd", &token).await; // upload failed
+        lease(&store, "0xd", 120).await; // retry with the same consume
     }
 
     #[tokio::test]
     async fn redemption_release_never_clears_commit() {
-        let store = NonceStore::in_memory(300, 10_000);
-        store.try_lease_redemption("0xd", 120).await;
-        store.commit_redemption("0xd", 3600).await.unwrap();
-        store.release_redemption("0xd").await; // must be a no-op on a committed key
+        let store = store();
+        let token = lease(&store, "0xd", 120).await;
+        store.commit_redemption("0xd", &token, 3600).await.unwrap();
+        store.release_redemption("0xd", &token).await; // must be a no-op on a committed key
         assert_eq!(
-            store.try_lease_redemption("0xd", 120).await,
+            store.try_lease_redemption("0xd", 120).await.unwrap(),
             Lease::Redeemed
         );
     }
 
     #[tokio::test]
     async fn redemption_expired_lease_is_reclaimable() {
-        let store = NonceStore::in_memory(300, 10_000);
-        assert_eq!(store.try_lease_redemption("0xd", 0).await, Lease::Ok); // lease expires immediately
-        assert_eq!(store.try_lease_redemption("0xd", 120).await, Lease::Ok); // reclaimed, not stuck
+        let store = store();
+        lease(&store, "0xd", 0).await; // lease expires immediately
+        lease(&store, "0xd", 120).await; // reclaimed, not stuck
+    }
+
+    #[tokio::test]
+    async fn a_stale_holder_cannot_release_or_commit_over_a_newer_lease() {
+        let store = store();
+        let stale = lease(&store, "0xd", 0).await; // lapses at once
+        let fresh = lease(&store, "0xd", 120).await; // a newer holder
+        assert_ne!(stale, fresh);
+        store.release_redemption("0xd", &stale).await; // must not clear the newer lease
+        assert_eq!(
+            store.try_lease_redemption("0xd", 120).await.unwrap(),
+            Lease::Leased
+        );
+        assert_eq!(
+            store.commit_redemption("0xd", &stale, 3600).await.unwrap(),
+            Commit::Lost
+        );
+        assert_eq!(
+            store.try_lease_redemption("0xd", 120).await.unwrap(),
+            Lease::Leased
+        );
+        assert_eq!(
+            store.commit_redemption("0xd", &fresh, 3600).await.unwrap(),
+            Commit::Ok
+        );
+        assert_eq!(
+            store.try_lease_redemption("0xd", 120).await.unwrap(),
+            Lease::Redeemed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_commit_after_the_lease_lapsed_is_lost() {
+        let store = store();
+        let token = lease(&store, "0xd", 0).await;
+        assert_eq!(
+            store.commit_redemption("0xd", &token, 3600).await.unwrap(),
+            Commit::Lost
+        );
     }
 
     // Real Redis/Dragonfly check of the Redis backend: GETDEL single-use, SET NX leases, and the
-    // Lua compare-and-delete release (which must never erase a commit). Keys are random and carry
-    // 60 s TTLs, so a shared instance is left clean. Run with:
+    // Lua compare-and-set commit / compare-and-delete release (owner-bound; never erase a commit).
+    // Keys are random and carry 60 s TTLs, so a shared instance is left clean. Run with:
     //   REDIS_URL=redis://:<password>@127.0.0.1:6379 cargo test -- --ignored redis_backend
     #[tokio::test]
     #[ignore = "needs REDIS_URL pointing at a Redis/Dragonfly instance"]
@@ -539,16 +631,34 @@ mod tests {
         let store = NonceStore::redis(&url, 60).await.expect("connect");
         let key = format!("test-{}", random_nonce());
 
-        assert_eq!(store.try_lease_redemption(&key, 60).await, Lease::Ok);
-        assert_eq!(store.try_lease_redemption(&key, 60).await, Lease::Leased);
-        store.release_redemption(&key).await; // Lua: deletes a `leased` value
-        assert_eq!(store.try_lease_redemption(&key, 60).await, Lease::Ok);
-        store.commit_redemption(&key, 60).await.expect("commit");
-        store.release_redemption(&key).await; // Lua: must NOT delete a `committed` value
-        assert_eq!(store.try_lease_redemption(&key, 60).await, Lease::Redeemed);
+        let t1 = lease(&store, &key, 60).await;
+        assert_eq!(
+            store.try_lease_redemption(&key, 60).await.unwrap(),
+            Lease::Leased
+        );
+        store.release_redemption(&key, "not-the-owner").await; // wrong token: no-op
+        assert_eq!(
+            store.try_lease_redemption(&key, 60).await.unwrap(),
+            Lease::Leased
+        );
+        store.release_redemption(&key, &t1).await; // Lua: deletes the owner's lease
+        let t2 = lease(&store, &key, 60).await;
+        assert_eq!(
+            store.commit_redemption(&key, &t1, 60).await.unwrap(),
+            Commit::Lost
+        );
+        assert_eq!(
+            store.commit_redemption(&key, &t2, 60).await.unwrap(),
+            Commit::Ok
+        );
+        store.release_redemption(&key, &t2).await; // Lua: must NOT delete a `committed` value
+        assert_eq!(
+            store.try_lease_redemption(&key, 60).await.unwrap(),
+            Lease::Redeemed
+        );
 
         let (nonce, _) = store.issue().await.expect("issue");
-        assert!(store.take_if_valid(&nonce).await);
-        assert!(!store.take_if_valid(&nonce).await);
+        assert!(store.take_if_valid(&nonce).await.unwrap());
+        assert!(!store.take_if_valid(&nonce).await.unwrap());
     }
 }

@@ -3,7 +3,14 @@
 //!
 //! # Environment Variables
 //!
+//! Every value is validated at startup: a typo (an unknown boolean, a negative or fractional number, a
+//! malformed origin) is an error, never a silent fall-back to a weaker mode.
+//!
 //! Required:
+//! - `GATEWAY_ORIGIN` — the canonical public origin of THIS gateway (`https://host`, no path,
+//!   lower-case). Signed into every access proof (`nft-gate:access:v2`), so a proof made for another
+//!   gateway is useless here.
+//! - `NETWORK` — `localnet` | `devnet` | `testnet` | `mainnet`; signed into every access proof.
 //! - `UPSTREAM_URL` — base URL of the upstream this gateway protects (trailing `/` stripped).
 //! - `SUI_RPC_URL` — Sui fullnode (queried over gRPC-web) for ownership / event / gate queries.
 //! - `NFT_TYPE` — the access_gate pass type: `<pkg>::access_gate::AccessNFT` or
@@ -12,7 +19,18 @@
 //!
 //! Optional (with defaults):
 //! - `CHALLENGE_TTL_SECS` — nonce lifetime in seconds (default: `300`).
-//! - `SINGLE_USE` — `true` to require an on-chain single-use consume (default: `false`).
+//! - `SINGLE_USE` — `true` to require an on-chain single-use consume (default: `false`). Requires
+//!   `REDIS_URL` (a restart or a second replica would otherwise forget spent consumes), unless
+//!   `ALLOW_VOLATILE_REDEMPTIONS=1` accepts that for development.
+//! - `GATED_PREAUTH_RATE_LIMIT_PER_MIN` — per-client-IP budget for gated requests, checked before
+//!   signature verification, 0 to disable (default: `120`).
+//! - `CONSUME_MAX_AGE_SECS` — single-use: oldest consume accepted, seconds since its event
+//!   (default: `432000` = 5 days, inside public fullnodes' transaction retention); at most
+//!   `REDEMPTION_RETENTION_SECS`.
+//! - `RPC_TIMEOUT_SECS` — deadline for each Sui RPC call (default: `15`).
+//! - `HEADER_READ_TIMEOUT_SECS` / `BODY_READ_TIMEOUT_SECS` — slow-client limits (defaults: `10`/`30`).
+//! - `MAX_CONNECTIONS` — open client connections (default: `1024`).
+//! - `SHUTDOWN_GRACE_SECS` — how long in-flight requests may finish after SIGTERM (default: `30`).
 //! - `PUBLIC_PATHS` — comma-separated paths proxied without auth (default: `/v1/tip-config`).
 //! - `RATE_LIMIT_PER_MIN` — per-address request budget per minute, 0 to disable (default: `30`).
 //! - `CHALLENGE_RATE_LIMIT_PER_MIN` — per-IP budget for the challenge endpoint per minute, 0 to
@@ -26,7 +44,7 @@
 //! - `NONCE_PRUNE_INTERVAL_SECS` — background prune cadence for in-memory store (default: `60`).
 //! - `OWNERSHIP_CACHE_TTL_MS` — ownership-cache TTL in ms, 0 to disable (default: `0`).
 //! - `REDEMPTION_LEASE_TTL_SECS` — single-use: lease window for an in-flight consume-digest
-//!   redemption (default: `120`).
+//!   redemption (default: `900`); must exceed `UPSTREAM_TIMEOUT_SECS`.
 //! - `REDEMPTION_RETENTION_SECS` — single-use: how long a committed (spent) consume-digest is
 //!   remembered to block re-redemption (default: `2592000` = 30 days).
 //! - `MAX_CONCURRENT_REQUESTS` — in-flight request cap; excess requests get `503` at once
@@ -34,16 +52,15 @@
 //! - `TRUSTED_PROXY_HOPS` — reverse proxies in front of the gateway (default: `0` → the TCP peer
 //!   address is the client IP). With N > 0 the client IP is the Nth `X-Forwarded-For` entry from
 //!   the right, i.e. the address the outermost trusted proxy saw.
-//! - `UPSTREAM_TIMEOUT_SECS` — whole-request timeout for upstream calls (default: `120`).
-//! - `ALLOWED_ORIGINS` — comma-separated browser origins allowed to call the gateway (CORS; e.g.
-//!   `https://app.example`). Unset → none: browsers get no `Access-Control-Allow-Origin` grant.
+//! - `UPSTREAM_TIMEOUT_SECS` — whole-request timeout for upstream calls (default: `600`).
+//! - `ALLOWED_ORIGINS` — comma-separated canonical browser origins allowed to call the gateway (CORS;
+//!   e.g. `https://app.example`). Unset → none: browsers get no `Access-Control-Allow-Origin` grant.
 //! - `MAX_RESPONSE_BYTES` — cap on a buffered upstream response (default: `16777216` = 16 MiB).
 //! - `ALLOW_INSECURE_HTTP` — `1` permits `http://` for `UPSTREAM_URL` / `SUI_RPC_URL` (localnet or
 //!   an in-cluster upstream); otherwise both must be `https://` (default: unset).
 //! - `UPSTREAM_AUTH_HEADERS` — JSON array `[{"name":…,"value":…}]` of headers added to every
 //!   upstream request (secret; same format as the Workers gateway).
-//! - `SUI_RPC_AUTH_HEADER` — one `Name: value` header added to every Sui RPC call (secret; a bare
-//!   value means `Authorization`).
+//! - `SUI_RPC_AUTH_HEADER` — one `Name: value` header added to every Sui RPC call (secret).
 
 use std::net::SocketAddr;
 
@@ -58,6 +75,10 @@ pub struct AuthHeader {
 pub struct GatewayConfig {
     /// Address to bind the HTTP server to.
     pub bind_addr: SocketAddr,
+    /// Canonical origin of this gateway, signed into every access proof.
+    pub gateway_origin: String,
+    /// The Sui network, signed into every access proof (one of [`crate::proof::NETWORKS`]).
+    pub network: String,
     /// Base URL of the upstream this gateway protects (e.g. the stock upload relay).
     pub upstream_url: String,
     /// Sui fullnode (gRPC-web) used for ownership / event / gate queries.
@@ -78,6 +99,8 @@ pub struct GatewayConfig {
     pub rate_limit_per_min: u32,
     /// Per-IP request budget for the challenge endpoint per minute (pre-auth).
     pub challenge_rate_limit_per_min: u32,
+    /// Per-IP request budget for gated requests per minute, checked before verification.
+    pub gated_preauth_rate_limit_per_min: u32,
     /// Maximum request body accepted before proxying (bytes).
     pub max_body_bytes: usize,
     /// Optional Redis/Dragonfly URL for a shared TTL nonce store (fleet-wide replay
@@ -96,6 +119,17 @@ pub struct GatewayConfig {
     pub redemption_lease_ttl_secs: u64,
     /// Single-use: retention (secs) of a committed (spent) consume-digest.
     pub redemption_retention_secs: u64,
+    /// Single-use: oldest accepted consume (secs since its event); at most the retention.
+    pub consume_max_age_secs: u64,
+    /// Single-use without Redis: accept that redemptions are forgotten on restart (development).
+    pub allow_volatile_redemptions: bool,
+    /// Deadline for each Sui RPC call (secs).
+    pub rpc_timeout_secs: u64,
+    /// Slow-client limits and connection cap.
+    pub header_read_timeout_secs: u64,
+    pub body_read_timeout_secs: u64,
+    pub max_connections: usize,
+    pub shutdown_grace_secs: u64,
     /// In-flight request cap (load-shed beyond it).
     pub max_concurrent_requests: usize,
     /// Number of trusted reverse proxies in front of the gateway (client-IP derivation).
@@ -121,6 +155,8 @@ impl std::fmt::Debug for GatewayConfig {
             .collect();
         f.debug_struct("GatewayConfig")
             .field("bind_addr", &self.bind_addr)
+            .field("gateway_origin", &self.gateway_origin)
+            .field("network", &self.network)
             .field("upstream_url", &self.upstream_url)
             .field("sui_rpc_url", &self.sui_rpc_url)
             .field("nft_type", &self.nft_type)
@@ -183,22 +219,26 @@ pub fn parse_upstream_auth_headers(raw: Option<&str>) -> anyhow::Result<Vec<Auth
         .collect()
 }
 
-/// Parse `SUI_RPC_AUTH_HEADER`: `Name: value`, or a bare value meaning `Authorization`.
+/// Parse `SUI_RPC_AUTH_HEADER`: `Name: value`. A bare value is refused (it used to be sent as
+/// `Authorization`, a guess the operator could not see), as are a bad header name and line breaks.
 pub fn parse_rpc_auth_header(raw: Option<&str>) -> anyhow::Result<Option<AuthHeader>> {
     let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
-    let (name, value) = match raw.split_once(':') {
-        Some((n, v)) if is_header_name(n.trim()) => (n.trim(), v.trim()),
-        _ => ("Authorization", raw),
-    };
-    if value.contains('\r') || value.contains('\n') {
-        anyhow::bail!("SUI_RPC_AUTH_HEADER value must not contain line breaks");
+    match raw.split_once(':') {
+        Some((n, v))
+            if is_header_name(n.trim())
+                && !v.trim().is_empty()
+                && !v.contains('\r')
+                && !v.contains('\n') =>
+        {
+            Ok(Some(AuthHeader {
+                name: n.trim().to_string(),
+                value: v.trim().to_string(),
+            }))
+        }
+        _ => anyhow::bail!("SUI_RPC_AUTH_HEADER must be \"Name: value\""),
     }
-    Ok(Some(AuthHeader {
-        name: name.to_string(),
-        value: value.to_string(),
-    }))
 }
 
 /// Require `https://` unless `allow_http` (localnet / in-cluster) permits `http://`.
@@ -212,9 +252,120 @@ fn check_scheme(var: &str, url: &str, allow_http: bool) -> anyhow::Result<()> {
     }
 }
 
-/// Return the value of `key` from the environment, or `default` if it is absent or empty.
-fn env_or(key: &str, default: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| default.to_string())
+/// The `scheme://host[:port]` prefix of an http(s) URL.
+fn origin_of(url: &str) -> &str {
+    let after = url.find("://").map_or(0, |i| i + 3);
+    match url[after..].find(['/', '?', '#']) {
+        Some(i) => &url[..after + i],
+        None => url,
+    }
+}
+
+/// True if `o` is a canonical origin: `https://host[:port]` (or `http://` for a loopback host), a
+/// lower-case ASCII host, no userinfo, path, query or fragment, and the scheme's default port omitted.
+pub fn is_canonical_origin(o: &str) -> bool {
+    let (rest, default_port, http) = if let Some(r) = o.strip_prefix("https://") {
+        (r, "443", false)
+    } else if let Some(r) = o.strip_prefix("http://") {
+        (r, "80", true)
+    } else {
+        return false;
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((h, p)) if !h.ends_with(']') || h.starts_with('[') => (h, Some(p)),
+        _ => (rest, None),
+    };
+    let host_ok = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || b == b'.' || b == b'-')
+        && !host.starts_with(['.', '-'])
+        && !host.ends_with(['.', '-']);
+    let loopback = matches!(host, "localhost" | "127.0.0.1");
+    let port_ok = port.is_none_or(|p| {
+        p != default_port
+            && !p.starts_with('0')
+            && p.len() <= 5
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n))
+    });
+    host_ok && port_ok && (!http || loopback)
+}
+
+/// Strict integer in `[min, max]`: an unset variable is `default`; anything else that is not a plain
+/// decimal in range is an error.
+fn parse_int<T>(
+    get: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+    default: T,
+    min: T,
+    max: T,
+) -> anyhow::Result<T>
+where
+    T: std::str::FromStr + PartialOrd + std::fmt::Display + Copy,
+{
+    let Some(raw) = get(key) else {
+        return Ok(default);
+    };
+    let raw = raw.trim();
+    let bad = || anyhow::anyhow!("{key} must be an integer in [{min}, {max}]");
+    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let n: T = raw.parse().map_err(|_| bad())?;
+    if n < min || n > max {
+        return Err(bad());
+    }
+    Ok(n)
+}
+
+/// Strict boolean: exactly `true` or `false`.
+fn parse_bool(
+    get: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+    default: bool,
+) -> anyhow::Result<bool> {
+    match get(key).as_deref() {
+        None => Ok(default),
+        Some("true") => Ok(true),
+        Some("false") => Ok(false),
+        Some(_) => anyhow::bail!("{key} must be \"true\" or \"false\""),
+    }
+}
+
+/// `PUBLIC_PATHS`: exact absolute paths, free of query, fragment and dot segments.
+fn parse_public_paths(raw: &str) -> anyhow::Result<Vec<String>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|p| {
+            let plain = p.starts_with('/')
+                && p.bytes().all(|b| {
+                    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'~' | b'-' | b'/')
+                })
+                && !p.split('/').any(|seg| seg == ".." || seg == ".");
+            if plain {
+                Ok(p.to_string())
+            } else {
+                anyhow::bail!("PUBLIC_PATHS entry is not a plain absolute path: {p}")
+            }
+        })
+        .collect()
+}
+
+/// `ALLOWED_ORIGINS`: canonical origins, comma-separated; unset or empty allows none.
+fn parse_allowed_origins(raw: &str, allow_http: bool) -> anyhow::Result<Vec<String>> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|o| {
+            if is_canonical_origin(o) && (allow_http || o.starts_with("https://")) {
+                Ok(o.to_string())
+            } else {
+                anyhow::bail!("ALLOWED_ORIGINS entry is not a canonical https origin: {o}")
+            }
+        })
+        .collect()
 }
 
 impl GatewayConfig {
@@ -222,115 +373,157 @@ impl GatewayConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if any required variable (`UPSTREAM_URL`, `SUI_RPC_URL`, `NFT_TYPE`,
-    /// `GATE_ID`) is absent or invalid, or if `BIND_ADDR` cannot be parsed as a socket address.
+    /// Returns an error if any required variable is absent or invalid, or any optional one is
+    /// malformed or out of range (see the module docs).
     pub fn from_env() -> anyhow::Result<Self> {
-        let bind_addr: SocketAddr = env_or("BIND_ADDR", "0.0.0.0:8080")
+        Self::from_lookup(&|key| std::env::var(key).ok())
+    }
+
+    /// [`from_env`](Self::from_env) over an arbitrary variable lookup (so tests need no process env).
+    pub fn from_lookup(get: &dyn Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
+        let required = |key: &str| -> anyhow::Result<String> {
+            get(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .ok_or_else(|| anyhow::anyhow!("{key} is required"))
+        };
+        let allow_http = match get("ALLOW_INSECURE_HTTP").as_deref() {
+            None | Some("") | Some("0") => false,
+            Some("1") => true,
+            Some(_) => anyhow::bail!("ALLOW_INSECURE_HTTP must be 1 (or unset)"),
+        };
+        let bind_addr: SocketAddr = get("BIND_ADDR")
+            .unwrap_or_else(|| "0.0.0.0:8080".to_string())
             .parse()
             .map_err(|e| anyhow::anyhow!("invalid BIND_ADDR: {e}"))?;
-        let upstream_url = std::env::var("UPSTREAM_URL")
-            .map_err(|_| anyhow::anyhow!("UPSTREAM_URL is required"))?
-            .trim_end_matches('/')
-            .to_string();
-        let sui_rpc_url =
-            std::env::var("SUI_RPC_URL").map_err(|_| anyhow::anyhow!("SUI_RPC_URL is required"))?;
-        let nft_type =
-            std::env::var("NFT_TYPE").map_err(|_| anyhow::anyhow!("NFT_TYPE is required"))?;
-        let nft_type = nft_type.trim().to_string();
+
+        let gateway_origin = required("GATEWAY_ORIGIN")?;
+        if !is_canonical_origin(&gateway_origin)
+            || (!allow_http && !gateway_origin.starts_with("https://"))
+        {
+            anyhow::bail!(
+                "GATEWAY_ORIGIN must be a canonical https origin (https://host, no path)"
+            );
+        }
+        let network = required("NETWORK")?;
+        if !crate::proof::NETWORKS.contains(&network.as_str()) {
+            anyhow::bail!(
+                "NETWORK must be one of {}",
+                crate::proof::NETWORKS.join(", ")
+            );
+        }
+        let upstream_url = required("UPSTREAM_URL")?.trim_end_matches('/').to_string();
+        let sui_rpc_url = required("SUI_RPC_URL")?;
+        check_scheme("UPSTREAM_URL", &upstream_url, allow_http)?;
+        check_scheme("SUI_RPC_URL", &sui_rpc_url, allow_http)?;
+        if origin_of(&upstream_url) == gateway_origin {
+            anyhow::bail!("UPSTREAM_URL must not be this gateway (request loop)");
+        }
+        let nft_type = required("NFT_TYPE")?;
         if !is_access_gate_pass_type(&nft_type) {
             anyhow::bail!(
                 "NFT_TYPE must be <pkg>::access_gate::AccessNFT or <pkg>::access_gate::SoulboundAccessNFT"
             );
         }
-        let gate_id = std::env::var("GATE_ID")
-            .map_err(|_| anyhow::anyhow!("GATE_ID is required"))?
-            .trim()
-            .to_string();
+        let gate_id = required("GATE_ID")?;
         if !is_object_id(&gate_id) {
             anyhow::bail!("GATE_ID must be a 0x-prefixed object ID");
         }
-        let challenge_ttl_secs = env_or("CHALLENGE_TTL_SECS", "300").parse().unwrap_or(300);
-        let single_use = env_or("SINGLE_USE", "false").eq_ignore_ascii_case("true");
-        let public_paths = env_or("PUBLIC_PATHS", "/v1/tip-config")
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        let rate_limit_per_min = env_or("RATE_LIMIT_PER_MIN", "30").parse().unwrap_or(30);
-        let challenge_rate_limit_per_min = env_or("CHALLENGE_RATE_LIMIT_PER_MIN", "30")
-            .parse()
-            .unwrap_or(30);
-        let max_body_bytes = env_or("MAX_BODY_BYTES", "262144")
-            .parse()
-            .unwrap_or(262_144);
-        let redis_url = std::env::var("REDIS_URL").ok().filter(|s| !s.is_empty());
-        let nonce_max_entries = env_or("NONCE_MAX_ENTRIES", "1000000")
-            .parse()
-            .unwrap_or(1_000_000);
-        let nonce_prune_interval_secs = env_or("NONCE_PRUNE_INTERVAL_SECS", "60")
-            .parse()
-            .unwrap_or(60);
-        let ownership_cache_ttl_ms = env_or("OWNERSHIP_CACHE_TTL_MS", "0").parse().unwrap_or(0);
-        let redemption_lease_ttl_secs = env_or("REDEMPTION_LEASE_TTL_SECS", "120")
-            .parse()
-            .unwrap_or(120);
-        let redemption_retention_secs = env_or("REDEMPTION_RETENTION_SECS", "2592000")
-            .parse()
-            .unwrap_or(2_592_000);
-        let max_concurrent_requests = env_or("MAX_CONCURRENT_REQUESTS", "64")
-            .parse::<usize>()
-            .unwrap_or(64)
-            .max(1);
-        let trusted_proxy_hops = env_or("TRUSTED_PROXY_HOPS", "0").parse().unwrap_or(0);
-        let upstream_timeout_secs = env_or("UPSTREAM_TIMEOUT_SECS", "120")
-            .parse::<u64>()
-            .unwrap_or(120)
-            .max(1);
-        let max_response_bytes = env_or("MAX_RESPONSE_BYTES", "16777216")
-            .parse()
-            .unwrap_or(16_777_216);
-        let allowed_origins = env_or("ALLOWED_ORIGINS", "")
-            .split(',')
-            .map(|o| o.trim().trim_end_matches('/').to_string())
-            .filter(|o| !o.is_empty())
-            .collect();
-        let allow_http = env_or("ALLOW_INSECURE_HTTP", "") == "1";
-        check_scheme("UPSTREAM_URL", &upstream_url, allow_http)?;
-        check_scheme("SUI_RPC_URL", &sui_rpc_url, allow_http)?;
+
+        let single_use = parse_bool(get, "SINGLE_USE", false)?;
+        let redis_url = get("REDIS_URL").filter(|s| !s.is_empty());
+        let allow_volatile_redemptions = parse_bool(get, "ALLOW_VOLATILE_REDEMPTIONS", false)?;
+        if single_use && redis_url.is_none() && !allow_volatile_redemptions {
+            anyhow::bail!(
+                "SINGLE_USE=true requires REDIS_URL: an in-memory store forgets spent consumes on restart \
+                 (set ALLOW_VOLATILE_REDEMPTIONS=true for development)"
+            );
+        }
+
+        let upstream_timeout_secs: u64 = parse_int(get, "UPSTREAM_TIMEOUT_SECS", 600, 1, 3600)?;
+        let redemption_lease_ttl_secs: u64 =
+            parse_int(get, "REDEMPTION_LEASE_TTL_SECS", 900, 30, 86_400)?;
+        if redemption_lease_ttl_secs <= upstream_timeout_secs {
+            anyhow::bail!(
+                "REDEMPTION_LEASE_TTL_SECS must exceed UPSTREAM_TIMEOUT_SECS (a lease must outlive its upload)"
+            );
+        }
+        let redemption_retention_secs: u64 = parse_int(
+            get,
+            "REDEMPTION_RETENTION_SECS",
+            2_592_000,
+            3600,
+            31_536_000,
+        )?;
+        let consume_max_age_secs: u64 =
+            parse_int(get, "CONSUME_MAX_AGE_SECS", 432_000, 60, 31_536_000)?;
+        if consume_max_age_secs > redemption_retention_secs {
+            anyhow::bail!(
+                "CONSUME_MAX_AGE_SECS must not exceed REDEMPTION_RETENTION_SECS (a spent consume must be remembered while it can be presented)"
+            );
+        }
+
         let upstream_auth_headers =
-            parse_upstream_auth_headers(std::env::var("UPSTREAM_AUTH_HEADERS").ok().as_deref())?;
-        let sui_rpc_auth_header =
-            parse_rpc_auth_header(std::env::var("SUI_RPC_AUTH_HEADER").ok().as_deref())?;
+            parse_upstream_auth_headers(get("UPSTREAM_AUTH_HEADERS").as_deref())?;
+        let sui_rpc_auth_header = parse_rpc_auth_header(get("SUI_RPC_AUTH_HEADER").as_deref())?;
 
         Ok(Self {
             bind_addr,
+            gateway_origin,
+            network,
             upstream_url,
             sui_rpc_url,
             nft_type,
             gate_id,
-            challenge_ttl_secs,
+            challenge_ttl_secs: parse_int(get, "CHALLENGE_TTL_SECS", 300, 10, 3600)?,
             single_use,
-            public_paths,
-            allowed_origins,
-            rate_limit_per_min,
-            challenge_rate_limit_per_min,
-            max_body_bytes,
+            public_paths: parse_public_paths(
+                &get("PUBLIC_PATHS").unwrap_or_else(|| "/v1/tip-config".to_string()),
+            )?,
+            allowed_origins: parse_allowed_origins(
+                &get("ALLOWED_ORIGINS").unwrap_or_default(),
+                allow_http,
+            )?,
+            rate_limit_per_min: parse_int(get, "RATE_LIMIT_PER_MIN", 30, 0, 1_000_000)?,
+            challenge_rate_limit_per_min: parse_int(
+                get,
+                "CHALLENGE_RATE_LIMIT_PER_MIN",
+                30,
+                0,
+                1_000_000,
+            )?,
+            gated_preauth_rate_limit_per_min: parse_int(
+                get,
+                "GATED_PREAUTH_RATE_LIMIT_PER_MIN",
+                120,
+                0,
+                1_000_000,
+            )?,
+            max_body_bytes: parse_int(get, "MAX_BODY_BYTES", 262_144, 1, 1_073_741_824)?,
             redis_url,
-            nonce_max_entries,
-            nonce_prune_interval_secs,
-            ownership_cache_ttl_ms,
+            nonce_max_entries: parse_int(get, "NONCE_MAX_ENTRIES", 1_000_000, 1, 100_000_000)?,
+            nonce_prune_interval_secs: parse_int(get, "NONCE_PRUNE_INTERVAL_SECS", 60, 1, 86_400)?,
+            ownership_cache_ttl_ms: parse_int(get, "OWNERSHIP_CACHE_TTL_MS", 0, 0, 3_600_000)?,
             redemption_lease_ttl_secs,
             redemption_retention_secs,
-            max_concurrent_requests,
-            trusted_proxy_hops,
+            consume_max_age_secs,
+            allow_volatile_redemptions,
+            rpc_timeout_secs: parse_int(get, "RPC_TIMEOUT_SECS", 15, 1, 120)?,
+            header_read_timeout_secs: parse_int(get, "HEADER_READ_TIMEOUT_SECS", 10, 1, 300)?,
+            body_read_timeout_secs: parse_int(get, "BODY_READ_TIMEOUT_SECS", 30, 1, 3600)?,
+            max_connections: parse_int(get, "MAX_CONNECTIONS", 1024, 1, 1_000_000)?,
+            shutdown_grace_secs: parse_int(get, "SHUTDOWN_GRACE_SECS", 30, 1, 3600)?,
+            max_concurrent_requests: parse_int(get, "MAX_CONCURRENT_REQUESTS", 64, 1, 100_000)?,
+            trusted_proxy_hops: parse_int(get, "TRUSTED_PROXY_HOPS", 0, 0, 16)?,
             upstream_timeout_secs,
-            max_response_bytes,
+            max_response_bytes: parse_int(get, "MAX_RESPONSE_BYTES", 16_777_216, 1, 1_073_741_824)?,
             upstream_auth_headers,
             sui_rpc_auth_header,
         })
     }
 
-    /// Returns `true` if `path` is in the configured public-paths list (proxied without auth).
+    /// Returns `true` if `path` is in the configured public-paths list (proxied without auth,
+    /// `GET`/`HEAD` only).
     pub fn is_public_path(&self, path: &str) -> bool {
         self.public_paths.iter().any(|p| p == path)
     }
@@ -401,9 +594,15 @@ mod validation_tests {
             .unwrap()
             .unwrap();
         assert_eq!((h.name.as_str(), h.value.as_str()), ("X-Api-Key", "k:1"));
-        let h = parse_rpc_auth_header(Some("Bearer tok")).unwrap().unwrap();
-        assert_eq!(h.name, "Authorization");
         assert!(parse_rpc_auth_header(Some("")).unwrap().is_none());
+        for bad in [
+            "Bearer tok",
+            "Bad Name: v",
+            "X-Key: ",
+            "X-Key: a\r\nInjected: 1",
+        ] {
+            assert!(parse_rpc_auth_header(Some(bad)).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -433,5 +632,177 @@ mod validation_tests {
         assert!(!is_object_id("0x"));
         assert!(!is_object_id("gate"));
         assert!(!is_object_id(&format!("0x{}", "a".repeat(65))));
+    }
+
+    use std::collections::HashMap;
+
+    fn base() -> HashMap<&'static str, String> {
+        HashMap::from([
+            ("GATEWAY_ORIGIN", "https://gateway.example.com".to_string()),
+            ("NETWORK", "testnet".to_string()),
+            (
+                "UPSTREAM_URL",
+                "https://relay-origin.example.com".to_string(),
+            ),
+            (
+                "SUI_RPC_URL",
+                "https://fullnode.testnet.sui.io:443".to_string(),
+            ),
+            ("NFT_TYPE", "0x1::access_gate::AccessNFT".to_string()),
+            ("GATE_ID", "0x2".to_string()),
+        ])
+    }
+
+    fn load(extra: &[(&'static str, &str)]) -> anyhow::Result<GatewayConfig> {
+        let mut env = base();
+        for (k, v) in extra {
+            if v == &"<unset>" {
+                env.remove(k);
+            } else {
+                env.insert(k, v.to_string());
+            }
+        }
+        GatewayConfig::from_lookup(&|k| env.get(k).cloned())
+    }
+
+    fn err(extra: &[(&'static str, &str)]) -> String {
+        load(extra).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn defaults_load_and_are_self_consistent() {
+        let cfg = load(&[]).unwrap();
+        assert_eq!(cfg.gateway_origin, "https://gateway.example.com");
+        assert_eq!(cfg.network, "testnet");
+        assert!(cfg.allowed_origins.is_empty());
+        assert!(cfg.redemption_lease_ttl_secs > cfg.upstream_timeout_secs);
+        assert!(cfg.consume_max_age_secs <= cfg.redemption_retention_secs);
+    }
+
+    #[test]
+    fn audience_binding_inputs_are_required_and_canonical() {
+        assert!(err(&[("GATEWAY_ORIGIN", "<unset>")]).contains("GATEWAY_ORIGIN"));
+        for bad in [
+            "gateway.example.com",
+            "http://gateway.example.com",
+            "https://gateway.example.com/",
+            "https://Gateway.example.com",
+            "https://gateway.example.com:443",
+            "https://user@gateway.example.com",
+        ] {
+            assert!(
+                err(&[("GATEWAY_ORIGIN", bad)]).contains("GATEWAY_ORIGIN"),
+                "{bad}"
+            );
+        }
+        assert!(err(&[("NETWORK", "testnet2")]).contains("NETWORK"));
+        assert!(err(&[("NETWORK", "<unset>")]).contains("NETWORK"));
+        assert!(err(&[("UPSTREAM_URL", "https://gateway.example.com/relay")]).contains("loop"));
+    }
+
+    #[test]
+    fn a_typo_never_selects_a_weaker_mode() {
+        for bad in ["TRUE", "1", "yes", "true ", ""] {
+            assert!(
+                err(&[("SINGLE_USE", bad)]).contains("SINGLE_USE"),
+                "{bad:?}"
+            );
+        }
+        for (key, bad) in [
+            ("MAX_BODY_BYTES", "0"),
+            ("MAX_BODY_BYTES", "-1"),
+            ("MAX_BODY_BYTES", "1.5"),
+            ("MAX_BODY_BYTES", "lots"),
+            ("RATE_LIMIT_PER_MIN", "-5"),
+            ("NONCE_MAX_ENTRIES", "0"),
+            ("CHALLENGE_TTL_SECS", "1"),
+            ("UPSTREAM_TIMEOUT_SECS", "0"),
+            ("REDEMPTION_LEASE_TTL_SECS", "5"),
+            ("TRUSTED_PROXY_HOPS", "-1"),
+        ] {
+            assert!(err(&[(key, bad)]).contains(key), "{key}={bad}");
+        }
+        assert_eq!(
+            load(&[("RATE_LIMIT_PER_MIN", "0")])
+                .unwrap()
+                .rate_limit_per_min,
+            0
+        );
+    }
+
+    #[test]
+    fn origins_and_public_paths_are_validated() {
+        assert!(load(&[(
+            "ALLOWED_ORIGINS",
+            " https://a.example , https://b.example:8443 "
+        )])
+        .is_ok());
+        for bad in [
+            "*",
+            "http://a.example",
+            "https://a.example/",
+            "https://A.example",
+            "a.example",
+        ] {
+            assert!(
+                err(&[("ALLOWED_ORIGINS", bad)]).contains("ALLOWED_ORIGINS"),
+                "{bad}"
+            );
+        }
+        assert_eq!(
+            load(&[("PUBLIC_PATHS", "/v1/tip-config, /health")])
+                .unwrap()
+                .public_paths,
+            vec!["/v1/tip-config", "/health"]
+        );
+        for bad in ["v1/tip-config", "/a/../b", "/a?x=1", "/a b"] {
+            assert!(
+                err(&[("PUBLIC_PATHS", bad)]).contains("PUBLIC_PATHS"),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_use_needs_a_durable_store_and_consistent_windows() {
+        assert!(err(&[("SINGLE_USE", "true")]).contains("REDIS_URL"));
+        assert!(load(&[("SINGLE_USE", "true"), ("REDIS_URL", "redis://r:6379")]).is_ok());
+        assert!(load(&[
+            ("SINGLE_USE", "true"),
+            ("ALLOW_VOLATILE_REDEMPTIONS", "true")
+        ])
+        .is_ok());
+        assert!(err(&[
+            ("UPSTREAM_TIMEOUT_SECS", "600"),
+            ("REDEMPTION_LEASE_TTL_SECS", "600")
+        ])
+        .contains("exceed UPSTREAM_TIMEOUT_SECS"));
+        assert!(err(&[
+            ("CONSUME_MAX_AGE_SECS", "864000"),
+            ("REDEMPTION_RETENTION_SECS", "432000")
+        ])
+        .contains("CONSUME_MAX_AGE_SECS"));
+    }
+
+    #[test]
+    fn canonical_origin_rules() {
+        for ok in [
+            "https://a.example",
+            "https://a.example:8443",
+            "http://localhost:8787",
+            "http://127.0.0.1:3000",
+        ] {
+            assert!(is_canonical_origin(ok), "{ok}");
+        }
+        for bad in [
+            "https://a.example:443",
+            "https://a.example/x",
+            "https://a.example?x",
+            "http://a.example",
+            "https://",
+            "https://a b",
+        ] {
+            assert!(!is_canonical_origin(bad), "{bad}");
+        }
     }
 }

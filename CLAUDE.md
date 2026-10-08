@@ -35,21 +35,22 @@ Both implementations MUST produce identical decisions for any given proof token.
 enforced by the shared `conformance/vectors.json` golden vectors, which both test suites consume.
 
 If you change any of the following, update BOTH implementations and regenerate the vectors:
-- The signing message prefix (`nft-gate:access:<nonce>`)
+- The signed message (`nft-gate:access:v2` and its audience lines: origin, gate, network, nonce, consume)
 - The proof token format (`base64(JSON { address, nonce, signature, consumeDigest? })`)
 - The `Authorization: Bearer` / `X-Access-Proof` header preference logic
 - The Sui signature wire format (flag || sig || pubkey)
 - Address normalization rules
 
-Regenerate conformance vectors after any wire-format change:
-```bash
-node gateway-workers/scripts/gen-vectors.mjs > conformance/vectors.json
-```
+The vectors are generated and published by `@meddleware/nft-gate-client` (`scripts/gen-vectors.mjs`,
+`@meddleware/nft-gate-client/vectors.json`). After a wire-format change: release the client, bump it
+in `gateway-workers`, then `node scripts/sync-vectors.mjs` (CI runs it with `--check`).
 
 ## Conformance vectors (`conformance/vectors.json`)
 
 Covers:
-- `personalMessage` — the exact bytes the wallet signs for a given nonce
+- `personalMessage` — the exact bytes the wallet signs for a context (origin, gate, network, nonce,
+  consume), plus the contexts no implementation may sign
+- `audienceMismatch` — valid signatures whose verifier-side context differs in one bound field
 - `proofDecode` — base64(JSON) proof token → decoded fields
 - `signatures[]` — one entry per signature scheme (ed25519, secp256k1, secp256r1) with a real
   Sui personal-message signature and the corresponding proof token

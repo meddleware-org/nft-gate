@@ -20,7 +20,6 @@
 | `src/state/select.ts` | `makeBackend` — picks DO or KV backend |
 | `src/state/durable_object.ts` | `NonceRateState` (DO class); `DurableObjectBackend` |
 | `src/state/kv.ts` | `KvBackend` (Workers KV fallback) |
-| `scripts/gen-vectors.mjs` | Generate `../conformance/vectors.json` |
 | `wrangler.toml` | Cloudflare Workers config: routes, bindings, cron trigger |
 
 ## Build and test commands

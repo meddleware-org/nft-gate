@@ -30,11 +30,12 @@ live responses (`sui_rpc::tests::live_consume_tx_valid`, `--ignored`).
 
 The permanent on-chain `consumeDigest` is the one-time token, exactly as in the Workers gateway.
 `verify_access_request` returns `Verified { address, redemption_key }`; for single-use the dispatcher
-(`main.rs`) leases the digest (`NonceStore::try_lease_redemption`), proxies, then `commit`s on a 2xx
-upstream response or `release`s on failure — so an interrupted upload leaves the consume redeemable
+(`main.rs`) leases the digest (`NonceStore::try_lease_redemption`, which returns an owner token), proxies, then `commit`s with
+the token on a 2xx upstream response or `release`s with it on failure (Lua compare-and-set in Redis) — so an interrupted upload leaves the consume redeemable
 while a duplicate can't double-spend it. Redis keys use the `nftgate:redeem:` prefix; the in-memory
-store mirrors the semantics. `REDEMPTION_LEASE_TTL_SECS` (120) / `REDEMPTION_RETENTION_SECS` (30d)
-tune the lease/retention windows. A `RedeemConflict` → `409`.
+store mirrors the semantics (and `SINGLE_USE=true` requires Redis unless `ALLOW_VOLATILE_REDEMPTIONS`).
+`REDEMPTION_LEASE_TTL_SECS` (900, above `UPSTREAM_TIMEOUT_SECS`) / `REDEMPTION_RETENTION_SECS` (30d)
+tune the lease/retention windows. `redeemed`/`leased` → `409` with a machine-readable `code`; a store error → `503`; a lost lease → `502`.
 
 ## Hardening invariants
 

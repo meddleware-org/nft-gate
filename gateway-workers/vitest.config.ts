@@ -44,6 +44,8 @@ export default defineConfig({
               // Override URL bindings with test doubles so the suite stays fully offline.
               bindings: {
                 UPSTREAM_URL: 'https://upstream.invalid',
+                GATEWAY_ORIGIN: 'https://gw.example.com',
+                NETWORK: 'testnet',
                 SUI_RPC_URL: 'https://rpc.invalid',
                 // A plain var in production (wrangler.toml); required by the config loader.
                 NFT_TYPE:

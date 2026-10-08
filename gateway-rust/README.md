@@ -89,6 +89,8 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 
 | Var | Required | Default | Meaning |
 | --- | --- | --- | --- |
+| `GATEWAY_ORIGIN` | ✓ | — | This gateway's canonical public origin (`https://host`, no path, lower-case); signed into every proof (`nft-gate:access:v2`) |
+| `NETWORK` | ✓ | — | `localnet` \| `devnet` \| `testnet` \| `mainnet`; signed into every proof |
 | `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream |
 | `SUI_RPC_URL` | ✓ | — | Sui fullnode (queried over gRPC-web) for ownership and event queries |
 | `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` (or the soulbound type); any other type — e.g. a fungible `Coin<T>` — is rejected at startup |
@@ -106,13 +108,20 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 | `CHALLENGE_RATE_LIMIT_PER_MIN` | | `30` | Per-client-IP budget for `GET /v1/challenge` and public paths (`0` disables) |
 | `TRUSTED_PROXY_HOPS` | | `0` | Reverse proxies in front of the gateway. `0`: the client IP is the TCP peer (forwarding headers ignored). `N`: the Nth `X-Forwarded-For` entry from the right (behind the k8s ingress alone, `1`) |
 | `MAX_CONCURRENT_REQUESTS` | | `64` | In-flight request cap; excess requests get `503 gateway overloaded` at once (`/healthz` is exempt) |
-| `UPSTREAM_TIMEOUT_SECS` | | `120` | Whole-request timeout for upstream calls |
+| `UPSTREAM_TIMEOUT_SECS` | | `600` | Whole-request timeout for upstream calls (`504` past it); the redemption lease must exceed it |
 | `ALLOWED_ORIGINS` | | unset | Comma-separated browser origins granted CORS (exact match, reflected with `Vary: Origin`; preflights answered before auth). Unset: no browser origin is granted — same policy as the Workers gateway |
 | `MAX_RESPONSE_BYTES` | | `16777216` | Cap on a buffered upstream response |
 | `UPSTREAM_AUTH_HEADERS` | | — | JSON array `[{"name":…,"value":…}]` of headers added to every upstream request (secret; same format as `gateway-workers`); invalid JSON aborts startup |
-| `SUI_RPC_AUTH_HEADER` | | — | `Name: value` header added to every Sui RPC call (secret; a bare value means `Authorization`) |
+| `SUI_RPC_AUTH_HEADER` | | — | `Name: value` header added to every Sui RPC call (secret); a bare value is refused |
 | `ALLOW_INSECURE_HTTP` | | — | `1` permits `http://` `UPSTREAM_URL` / `SUI_RPC_URL` (localnet, in-cluster upstream); otherwise both must be `https://` |
-| `REDEMPTION_LEASE_TTL_SECS` | | `120` | Single-use: lease window for an in-flight consume-digest redemption |
+| `REDEMPTION_LEASE_TTL_SECS` | | `900` | Single-use: lease window for an in-flight consume-digest redemption; must exceed `UPSTREAM_TIMEOUT_SECS` |
+| `CONSUME_MAX_AGE_SECS` | | `432000` | Single-use: oldest accepted consume (5 days); at most `REDEMPTION_RETENTION_SECS` |
+| `ALLOW_VOLATILE_REDEMPTIONS` | | `false` | Single-use without `REDIS_URL`: accept that spent consumes are forgotten on restart (development only; otherwise `SINGLE_USE=true` requires `REDIS_URL`) |
+| `GATED_PREAUTH_RATE_LIMIT_PER_MIN` | | `120` | Per-client-IP budget for gated requests, checked before signature verification (`0` disables) |
+| `RPC_TIMEOUT_SECS` | | `15` | Deadline for each Sui RPC call |
+| `HEADER_READ_TIMEOUT_SECS` / `BODY_READ_TIMEOUT_SECS` | | `10` / `30` | A client must send its request head / body within this long (slowloris limits) |
+| `MAX_CONNECTIONS` | | `1024` | Open client connections |
+| `SHUTDOWN_GRACE_SECS` | | `30` | How long in-flight requests may finish after SIGTERM |
 | `REDEMPTION_RETENTION_SECS` | | `2592000` | Single-use: how long a spent consume-digest is remembered |
 
 **Sui RPC URLs:**
@@ -143,8 +152,9 @@ are small. With the 100 MiB body cap used in front of the Walrus relay, lower
 client as a length-limited stream instead of `to_bytes`, and return the upstream `Incoming` body
 directly — so memory stays at one chunk per request regardless of size.
 
-**Timeouts.** Every outbound call has a 10 s connect timeout; Sui RPC calls a 30 s whole-request
-timeout and a 4 MiB response cap; upstream calls `UPSTREAM_TIMEOUT_SECS`.
+**Timeouts.** Every outbound call has a 10 s connect timeout; Sui RPC calls `RPC_TIMEOUT_SECS` and a 4 MiB response cap; upstream calls `UPSTREAM_TIMEOUT_SECS`. Inbound, a client must finish its request head within `HEADER_READ_TIMEOUT_SECS` and its body within `BODY_READ_TIMEOUT_SECS`, and at most `MAX_CONNECTIONS` connections are open.
+
+**Scope.** This gateway is for small-body upstreams (a tip-config read, a small API): bodies are buffered. A large-upload relay belongs behind `gateway-workers`, which streams.
 
 ## Signature scheme support
 

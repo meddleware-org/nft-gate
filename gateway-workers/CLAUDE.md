@@ -88,7 +88,7 @@ may switch to the KV backend for that isolate's lifetime.
 ## Single-use flow (SINGLE_USE=true)
 
 1. Client calls `GET /v1/challenge` → receives `{ nonce, expiresAt }`.
-2. Client signs `nft-gate:access:<nonce>` as a Sui personal message.
+2. Client signs the audience-bound `nft-gate:access:v2` message (this gateway's origin, gate, network, nonce and the consume digest) as a Sui personal message.
 3. Client submits an on-chain `access_gate::consume` transaction, capturing the transaction
    digest (`consumeDigest`). It persists the digest locally so a retry/reload reuses the SAME
    consume (re-signing a fresh challenge is free) instead of spending another use.
@@ -108,18 +108,25 @@ The consume event is **not** bound to the challenge nonce — the nonce is only 
 freshness/anti-replay. Single-use is enforced by the **redemption store** (see the state backend)
 keying on the permanent on-chain `consumeDigest`:
 
-- `tryLeaseRedemption` claims the digest for an in-flight upload (`ok` / `leased` / `redeemed`).
-- On a **successful** upload (`response.ok`) the dispatcher `commitRedemption`s it — spent, and
-  retained `REDEMPTION_RETENTION_SECS` (default 30d) to block re-redemption.
-- On **failure** it `releaseRedemption`s it, so the same consume is immediately retryable — an
-  interrupted upload (reload, tab close, wallet rejection, network blip) never burns a use.
+- `tryLeaseRedemption` claims the digest for an in-flight upload (`ok` with an owner token /
+  `leased` / `redeemed`).
+- On a **successful** upload (`response.ok`) the dispatcher `commitRedemption`s it with the token —
+  spent, and retained `REDEMPTION_RETENTION_SECS` (default 30d) to block re-redemption. A commit
+  whose lease lapsed (`lost`) is a `502`, never success, and leaves the newer holder alone.
+- On **failure** it `releaseRedemption`s it with the token, so the same consume is immediately
+  retryable — an interrupted upload (reload, tab close, wallet rejection, network blip) never burns
+  a use. Commit/release are compare-and-set on the token, so a stale holder cannot clear a newer lease.
+- Redemptions live only in the Durable Object (`RedemptionStore`); `loadConfig` refuses
+  `SINGLE_USE=true` with the KV backend and the quota-degrade flag is ignored in that mode.
+- A consume older than `CONSUME_MAX_AGE_SECS` is refused (the event's `timestamp_ms`), so it cannot
+  outlive its redemption record.
 - A `redeemed`/`leased` lease result → `409` (`code: "redeemed"` vs `"leased"`); the client clears
   its stored digest and consumes anew only on `redeemed`.
 
 Security: decoupling from the nonce is safe because the event `sender` must equal the
 signature-verified proof address (an attacker can't present someone else's consume; a soulbound NFT
 can't be transferred), and each digest is redeemable exactly once. The lease self-expires
-(`REDEMPTION_LEASE_TTL_SECS`, default 120s) so a crashed request can't strand a use — the rare cost
+(`REDEMPTION_LEASE_TTL_SECS`, default 900s, always above `UPSTREAM_TIMEOUT_SECS`) so a crashed request can't strand a use — the rare cost
 is at most one extra upload if a worker dies between upstream success and commit. `gateway-rust`
 implements the same lease/commit/release redemption (`NonceStore`, orchestrated in `main.rs`).
 
@@ -129,7 +136,7 @@ implements the same lease/commit/release redemption (`NonceStore`, orchestrated 
 npm run test:unit           # local vitest unit tests (including conformance vectors)
 npm run test:integration    # vitest with cloudflare-integration pool (requires wrangler)
 npm run test:all            # both
-node scripts/gen-vectors.mjs > ../conformance/vectors.json   # regenerate after wire changes
+node ../scripts/sync-vectors.mjs   # vectors are generated and published by @meddleware/nft-gate-client
 ```
 
 Both test projects consume `../../conformance/vectors.json` — changes there automatically
@@ -141,7 +148,7 @@ propagate to both Workers and Rust test suites.
   and breaking changes arrive without semver guarantees. Pin before deploying.
 - `@noble/curves` / `@noble/hashes`: same family used by `@mysten/sui` — intentional for
   consistency (same audited primitives, same hash outputs).
-- `@meddleware/nft-gate-client`: `wire.ts` re-exports `personalMessageForNonce`,
+- `@meddleware/nft-gate-client`: `wire.ts` re-exports `personalMessage`,
   `decodeAccessProof`, `AccessProof` directly — no duplication.
 - `@meddleware/access-gate-client`: `chain.ts` uses `ownsAccessNft` for the ownership check.
 

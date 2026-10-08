@@ -22,7 +22,6 @@ nft-gate/
 │   │       ├── durable_object.ts  # Durable Object backend (SQLite, default)
 │   │       └── kv.ts           # Workers KV backend (fallback)
 │   ├── test/                   # vitest unit + cloudflare-integration tests
-│   ├── scripts/gen-vectors.mjs # Conformance vector generator
 │   ├── wrangler.toml           # Cloudflare Workers config (edit routes here)
 │   └── package.json            # @meddleware/nft-gate-gateway v0.0.2
 ├── gateway-rust/               # Rust / Axum implementation
@@ -65,7 +64,7 @@ cd gateway-workers && npm run type-check
 ### Regenerate conformance vectors
 
 ```bash
-cd gateway-workers && node scripts/gen-vectors.mjs > ../conformance/vectors.json
+node scripts/sync-vectors.mjs   # vectors come from @meddleware/nft-gate-client
 ```
 
 Both test suites will pick up the new vectors automatically.

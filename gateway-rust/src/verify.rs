@@ -4,7 +4,7 @@
 
 use crate::challenge::NonceStore;
 use crate::config::GatewayConfig;
-use crate::proof::{decode_access_proof, personal_message_for_nonce};
+use crate::proof::{decode_access_proof, is_tx_digest, personal_message, MessageContext};
 use base64::prelude::*;
 use blake2::digest::consts::U32;
 use blake2::{Blake2b, Digest};
@@ -216,19 +216,23 @@ pub trait ChainQuery {
 
     /// Does `consume_digest` name a successful transaction that emitted an event of exactly
     /// `consumed_event_type` (the configured package's `AccessConsumedEvent`) for `address` (the
-    /// sender) on `gate_id`? Digest-first and NOT bound to the challenge nonce — single-use is
-    /// enforced by the redemption store keying on the digest, so an interrupted upload can resume
-    /// with a fresh challenge while reusing the same consume.
+    /// sender) on `gate_id`, no older than `max_age_secs`? Digest-first and NOT bound to the
+    /// challenge nonce — single-use is enforced by the redemption store keying on the digest, so an
+    /// interrupted upload can resume with a fresh challenge while reusing the same consume. A digest
+    /// the node does not know is `Ok(false)` (denied); an RPC failure is `Err` (`ChainError`).
     async fn consume_tx_valid(
         &self,
         consume_digest: &str,
         address: &str,
         consumed_event_type: &str,
         gate_id: Option<&str>,
+        max_age_secs: u64,
     ) -> anyhow::Result<bool>;
 
     /// Is `gate_id` paused AND does its immutable `GatePolicy` have `pause_blocks_access`? Holders
-    /// are then denied until the gate is unpaused. False for gates without that policy flag.
+    /// are then denied until the gate is unpaused. `Err` (→ `ChainError`, denied) if the gate's JSON
+    /// is not the shape this version understands: a rendering change must never silently disable
+    /// an admin's pause.
     async fn gate_access_blocked(&self, gate_id: &str) -> anyhow::Result<bool>;
 }
 
@@ -245,12 +249,12 @@ pub enum Denied {
     NotOwner,
     /// No matching on-chain single-use consume event was found (single-use mode).
     ConsumeMissing,
-    /// The consume has already been redeemed for an upload, or one is in progress (single-use).
-    RedeemConflict,
     /// The gate is paused and its policy has `pause_blocks_access`.
     GatePaused,
     /// An on-chain query failed; the gateway returns 502 for this variant.
     ChainError,
+    /// The gateway's own state store failed; the gateway returns 503 (never a conflict).
+    StateUnavailable,
 }
 
 impl Denied {
@@ -262,11 +266,9 @@ impl Denied {
             Denied::NonceInvalid => "challenge nonce invalid, expired, or already used",
             Denied::NotOwner => "address does not hold the required access NFT",
             Denied::ConsumeMissing => "no matching single-use consume for this address",
-            Denied::RedeemConflict => {
-                "this consume is already redeemed or an upload for it is in progress"
-            }
             Denied::GatePaused => "the gate is paused",
             Denied::ChainError => "on-chain verification failed",
+            Denied::StateUnavailable => "gateway state unavailable",
         }
     }
 }
@@ -290,7 +292,24 @@ pub async fn verify_access_request<C: ChainQuery>(
 ) -> Result<Verified, Denied> {
     let proof = decode_access_proof(token).map_err(|_| Denied::BadProof)?;
 
-    let message = personal_message_for_nonce(&proof.nonce);
+    // Single-use gateways need the consume digest before anything else (it is part of the signed
+    // message); ownership gateways build the message without one, so a signature made for the other
+    // mode, another gateway, gate or network simply fails to verify.
+    if cfg.single_use && proof.consume_digest.is_none() {
+        return Err(Denied::ConsumeMissing);
+    }
+    let message = personal_message(&MessageContext {
+        origin: &cfg.gateway_origin,
+        gate_id: &normalize_address(&cfg.gate_id),
+        network: &cfg.network,
+        nonce: &proof.nonce,
+        consume_digest: if cfg.single_use {
+            proof.consume_digest.as_deref()
+        } else {
+            None
+        },
+    })
+    .map_err(|_| Denied::BadProof)?;
     if !verify_personal_message_signature(&proof.address, &message, &proof.signature) {
         return Err(Denied::BadSignature);
     }
@@ -304,7 +323,11 @@ pub async fn verify_access_request<C: ChainQuery>(
     let address = normalize_address(&proof.address);
 
     // Consume the nonce exactly once (fresh, unexpired, unused).
-    if !store.take_if_valid(&proof.nonce).await {
+    if !store
+        .take_if_valid(&proof.nonce)
+        .await
+        .map_err(|_| Denied::StateUnavailable)?
+    {
         return Err(Denied::NonceInvalid);
     }
 
@@ -321,7 +344,7 @@ pub async fn verify_access_request<C: ChainQuery>(
     if cfg.single_use {
         // A single-use client MUST first submit an on-chain consume and include its digest;
         // its absence signals a misconfigured/replaying client.
-        let Some(digest) = proof.consume_digest.as_deref() else {
+        let Some(digest) = proof.consume_digest.as_deref().filter(|d| is_tx_digest(d)) else {
             return Err(Denied::ConsumeMissing);
         };
         let ok = chain
@@ -330,6 +353,7 @@ pub async fn verify_access_request<C: ChainQuery>(
                 &address,
                 &consumed_event_type(&cfg.nft_type),
                 Some(cfg.gate_id.as_str()),
+                cfg.consume_max_age_secs,
             )
             .await
             .map_err(|_| Denied::ChainError)?;
@@ -364,13 +388,34 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json::json;
 
+    const DIGEST: &str = "5Wq9tE4gXz8hEvFhYt8KkTJb2Pp6qXqj8cRk3xN1mYdL";
+
+    /// The message a client signs for the test gateway (origin https://gateway.example, gate 0x2,
+    /// testnet), with an optional consume digest.
+    fn msg_for(nonce: &str, consume_digest: Option<&str>) -> Vec<u8> {
+        let cfg = crate::tests_support::test_cfg();
+        personal_message(&MessageContext {
+            origin: &cfg.gateway_origin,
+            gate_id: &normalize_address(&cfg.gate_id),
+            network: &cfg.network,
+            nonce,
+            consume_digest,
+        })
+        .unwrap()
+    }
+
+    /// `msg_for` with no consume digest.
+    fn signed_msg(nonce: &str) -> Vec<u8> {
+        msg_for(nonce, None)
+    }
+
     fn build_token(
         sk: &SigningKey,
         address: &str,
         nonce: &str,
         consume_digest: Option<&str>,
     ) -> String {
-        let message = personal_message_for_nonce(nonce);
+        let message = msg_for(nonce, consume_digest);
         let digest = signing_digest(&message);
         let sig = sk.sign(&digest);
         let mut serialized = Vec::with_capacity(97);
@@ -394,7 +439,7 @@ mod tests {
     #[test]
     fn signature_verifies_and_recovers_address() {
         let (sk, address) = keypair();
-        let msg = personal_message_for_nonce("nonce-1");
+        let msg = signed_msg("nonce-1");
         let proof: AccessProof =
             crate::proof::decode_access_proof(&build_token(&sk, &address, "nonce-1", None))
                 .unwrap();
@@ -414,7 +459,7 @@ mod tests {
         let pk_bytes = pk.as_bytes(); // 33-byte compressed
         let address = derive_address(FLAG_SECP256K1, pk_bytes);
 
-        let msg = personal_message_for_nonce("k1-nonce");
+        let msg = signed_msg("k1-nonce");
         let digest = signing_digest(&msg);
         // k256 Signer applies SHA256 internally, matching Sui's ECDSA hash: SHA256(blake2b).
         let sig: Signature = sk.sign(&digest);
@@ -427,7 +472,7 @@ mod tests {
         // wrong address rejected
         assert!(!verify_personal_message_signature("0xdead", &msg, &sig_b64));
         // tampered message rejected
-        let other = personal_message_for_nonce("k1-other");
+        let other = signed_msg("k1-other");
         assert!(!verify_personal_message_signature(
             &address, &other, &sig_b64
         ));
@@ -442,7 +487,7 @@ mod tests {
         let pk_bytes = pk.as_bytes();
         let address = derive_address(FLAG_SECP256R1, pk_bytes);
 
-        let msg = personal_message_for_nonce("r1-nonce");
+        let msg = signed_msg("r1-nonce");
         let digest = signing_digest(&msg);
         // p256 Signer applies SHA256 internally, matching Sui's ECDSA hash: SHA256(blake2b).
         let sig: Signature = sk.sign(&digest);
@@ -458,7 +503,7 @@ mod tests {
     #[test]
     fn multisig_and_zklogin_flags_fail_closed() {
         // flag 0x03 (multisig) / 0x05 (zkLogin) are recognised but not yet verified → false.
-        let msg = personal_message_for_nonce("n");
+        let msg = signed_msg("n");
         let mut ms = vec![FLAG_MULTISIG];
         ms.extend_from_slice(&[0u8; 96]);
         assert!(!verify_personal_message_signature(
@@ -475,30 +520,47 @@ mod tests {
         ));
     }
 
-    // ── golden vector — mirrors nft-gate-client proof.test.ts + docs/challenge-response.md ──
-    #[test]
-    fn golden_vector_personal_message() {
-        assert_eq!(
-            personal_message_for_nonce("GOLDEN-NONCE-123"),
-            b"nft-gate:access:GOLDEN-NONCE-123".to_vec()
-        );
+    // ── cross-implementation conformance: the SAME fixtures the Workers gateway verifies
+    // (conformance/vectors.json, generated and published by @meddleware/nft-gate-client), so the
+    // implementations cannot silently drift on the wire format. Each `signatures[]` entry is a real
+    // Sui personal-message signature over the v2 message for its `context`. ──
+    fn message_of(ctx: &serde_json::Value) -> anyhow::Result<Vec<u8>> {
+        personal_message(&MessageContext {
+            origin: ctx["origin"].as_str().unwrap(),
+            gate_id: ctx["gateId"].as_str().unwrap(),
+            network: ctx["network"].as_str().unwrap(),
+            nonce: ctx["nonce"].as_str().unwrap(),
+            consume_digest: ctx["consumeDigest"].as_str(),
+        })
     }
 
-    // ── cross-implementation conformance: the SAME fixtures the Workers gateway verifies
-    // (gateway/conformance/vectors.json), so the two implementations cannot silently drift on
-    // the wire format. Each `signatures[]` entry is a real Sui personal-message signature. ──
     #[test]
     fn conformance_shared_vectors() {
         let raw = include_str!("../../conformance/vectors.json");
         let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(v["version"], "nft-gate:access:v2");
 
-        // personal-message derivation
-        let pm = &v["personalMessage"];
-        let nonce = pm["nonce"].as_str().unwrap();
-        assert_eq!(
-            personal_message_for_nonce(nonce),
-            pm["messageUtf8"].as_str().unwrap().as_bytes().to_vec()
-        );
+        // personal-message derivation, byte for byte
+        for c in v["personalMessage"]["cases"].as_array().unwrap() {
+            let bytes = message_of(&c["context"]).unwrap();
+            assert_eq!(
+                bytes,
+                c["messageUtf8"].as_str().unwrap().as_bytes(),
+                "{}",
+                c["name"]
+            );
+            assert_eq!(
+                BASE64_STANDARD.encode(&bytes),
+                c["messageBytesBase64"].as_str().unwrap()
+            );
+        }
+        for c in v["personalMessageRejects"].as_array().unwrap() {
+            // `message_of` does not re-check the origin (config does); the other fields it does.
+            let origin = c["context"]["origin"].as_str().unwrap();
+            let refused =
+                message_of(&c["context"]).is_err() || !crate::config::is_canonical_origin(origin);
+            assert!(refused, "must refuse: {}", c["name"]);
+        }
 
         // proof decode
         let pd = &v["proofDecode"];
@@ -510,7 +572,7 @@ mod tests {
             pd["expect"]["signature"].as_str().unwrap()
         );
 
-        // proof decode rejections — oversize and non-ASCII fields fail in both gateways
+        // proof decode rejections: the field grammar, size and ASCII rules
         for case in v["proofDecodeRejects"]["cases"].as_array().unwrap() {
             assert!(
                 crate::proof::decode_access_proof(case["token"].as_str().unwrap()).is_err(),
@@ -519,26 +581,22 @@ mod tests {
             );
         }
 
-        // address normalization — the proof address is canonicalised before on-chain owner
-        // comparison; both gateways must produce identical output for the same input.
+        // address normalization — canonicalised before on-chain owner comparison
         for case in v["addressNormalization"]["cases"].as_array().unwrap() {
             let input = case["input"].as_str().unwrap();
-            let expected = case["expected"].as_str().unwrap();
             assert_eq!(
                 normalize_address(input),
-                expected,
+                case["expected"].as_str().unwrap(),
                 "address normalization diverged for input {input}"
             );
         }
 
-        // per-scheme signature verification (ed25519 / secp256k1 / secp256r1)
+        // per-scheme signature verification (ed25519 / secp256k1 / secp256r1 / single-use)
         for sig in v["signatures"].as_array().unwrap() {
             let address = sig["address"].as_str().unwrap();
-            let nonce = sig["nonce"].as_str().unwrap();
-            let signature = sig["signature"].as_str().unwrap();
-            let msg = personal_message_for_nonce(nonce);
+            let m = message_of(&sig["context"]).unwrap();
             assert!(
-                verify_personal_message_signature(address, &msg, signature),
+                verify_personal_message_signature(address, &m, sig["signature"].as_str().unwrap()),
                 "scheme {} failed to verify",
                 sig["scheme"].as_str().unwrap_or("?")
             );
@@ -546,14 +604,28 @@ mod tests {
             assert_eq!(p.address, address);
         }
 
-        // negative vectors: high-S ECDSA, non-canonical ed25519 s, wrong intent, truncation and
-        // the unsupported flags must all be rejected by both implementations.
-        for neg in v["negativeSignatures"].as_array().unwrap() {
-            let msg = personal_message_for_nonce(neg["nonce"].as_str().unwrap());
+        // a valid signature presented for a different audience (origin, gate, network, nonce, consume)
+        for neg in v["audienceMismatch"].as_array().unwrap() {
+            let m = message_of(&neg["context"]).unwrap();
             assert!(
                 !verify_personal_message_signature(
                     neg["address"].as_str().unwrap(),
-                    &msg,
+                    &m,
+                    neg["signature"].as_str().unwrap()
+                ),
+                "audience mismatch accepted: {}",
+                neg["case"]
+            );
+        }
+
+        // negative vectors: high-S ECDSA, non-canonical ed25519 s, wrong intent, truncation and the
+        // unsupported flags must all be rejected by both implementations.
+        for neg in v["negativeSignatures"].as_array().unwrap() {
+            let m = message_of(&neg["context"]).unwrap();
+            assert!(
+                !verify_personal_message_signature(
+                    neg["address"].as_str().unwrap(),
+                    &m,
                     neg["signature"].as_str().unwrap()
                 ),
                 "negative vector accepted: {}",
@@ -564,11 +636,10 @@ mod tests {
         // ZIP-215: Sui validators verify ed25519 under ZIP-215, so the gateway must accept this
         // small-order vector (a strict RFC 8032 verifier rejects it).
         let z = &v["zip215"];
-        let msg = personal_message_for_nonce(z["nonce"].as_str().unwrap());
         assert!(
             verify_personal_message_signature(
                 z["address"].as_str().unwrap(),
-                &msg,
+                &message_of(&z["context"]).unwrap(),
                 z["signature"].as_str().unwrap()
             ),
             "ZIP-215 vector rejected"
@@ -578,7 +649,7 @@ mod tests {
     #[test]
     fn signature_rejected_for_wrong_address() {
         let (sk, _addr) = keypair();
-        let msg = personal_message_for_nonce("nonce-1");
+        let msg = signed_msg("nonce-1");
         let proof: AccessProof =
             crate::proof::decode_access_proof(&build_token(&sk, "0xdead", "nonce-1", None))
                 .unwrap();
@@ -596,7 +667,7 @@ mod tests {
         let proof: AccessProof =
             crate::proof::decode_access_proof(&build_token(&sk, &address, "nonce-A", None))
                 .unwrap();
-        let other_msg = personal_message_for_nonce("nonce-B");
+        let other_msg = signed_msg("nonce-B");
         assert!(!verify_personal_message_signature(
             &address,
             &other_msg,
@@ -619,7 +690,9 @@ mod tests {
             _a: &str,
             event_type: &str,
             _g: Option<&str>,
+            max_age_secs: u64,
         ) -> anyhow::Result<bool> {
+            assert_eq!(max_age_secs, 432_000, "the configured consume age bound");
             // The verifier must ask for the configured package's exact event type.
             assert_eq!(
                 event_type,
@@ -747,7 +820,7 @@ mod tests {
         let (sk, address) = keypair();
         let store = NonceStore::in_memory(300, 10_000);
         let (nonce, _) = store.issue_specific("n5").await;
-        let token = build_token(&sk, &address, &nonce, Some("0xdigest"));
+        let token = build_token(&sk, &address, &nonce, Some(DIGEST));
         // owns but no consume -> denied
         let denied = verify_access_request(
             &cfg(true),
@@ -763,7 +836,7 @@ mod tests {
         assert_eq!(denied.unwrap_err(), Denied::ConsumeMissing);
 
         let (nonce2, _) = store.issue_specific("n6").await;
-        let token2 = build_token(&sk, &address, &nonce2, Some("0xdigest"));
+        let token2 = build_token(&sk, &address, &nonce2, Some(DIGEST));
         let ok = verify_access_request(
             &cfg(true),
             &store,
@@ -778,7 +851,7 @@ mod tests {
         let v = ok.unwrap();
         assert_eq!(v.address, address);
         // single-use returns the consume digest as the redemption key for the dispatcher to lease
-        assert_eq!(v.redemption_key.as_deref(), Some("0xdigest"));
+        assert_eq!(v.redemption_key.as_deref(), Some(DIGEST));
     }
 
     #[tokio::test]
@@ -821,7 +894,7 @@ mod tests {
         let (sk, address) = keypair();
         let store = NonceStore::in_memory(300, 10_000);
         let (nonce, _) = store.issue_specific("paused-2").await;
-        let token = build_token(&sk, &address, &nonce, Some("0xdigest"));
+        let token = build_token(&sk, &address, &nonce, Some(DIGEST));
         let chain = MockChain {
             owns: true,
             consumed: true,
@@ -830,5 +903,82 @@ mod tests {
         let res = verify_access_request(&cfg(true), &store, &token, &chain).await;
         // No redemption key is produced, so the consume is never leased and stays redeemable.
         assert_eq!(res.unwrap_err(), Denied::GatePaused);
+    }
+
+    // ── audience binding (protocol v2) ──
+    fn chain_ok() -> MockChain {
+        MockChain {
+            owns: true,
+            consumed: true,
+            blocked: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_a_proof_made_for_another_gateway_gate_or_network() {
+        let (sk, address) = keypair();
+        let signed_for_this_gateway = || build_token(&sk, &address, "aud-nonce", None);
+        for (what, mutate) in [
+            (
+                "another gateway origin",
+                Box::new(|c: &mut GatewayConfig| c.gateway_origin = "https://other.example".into())
+                    as Box<dyn Fn(&mut GatewayConfig)>,
+            ),
+            (
+                "another gate",
+                Box::new(|c: &mut GatewayConfig| c.gate_id = "0x3".into()),
+            ),
+            (
+                "another network",
+                Box::new(|c: &mut GatewayConfig| c.network = "mainnet".into()),
+            ),
+        ] {
+            let store = NonceStore::in_memory(300, 10_000);
+            store.issue_specific("aud-nonce").await;
+            let token = signed_for_this_gateway();
+            let mut c = cfg(false);
+            mutate(&mut c);
+            let res = verify_access_request(&c, &store, &token, &chain_ok()).await;
+            assert_eq!(res.unwrap_err(), Denied::BadSignature, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_the_v1_message_and_a_cross_mode_signature() {
+        let (sk, address) = keypair();
+        // v1: just "nft-gate:access:<nonce>" signed.
+        let v1 = b"nft-gate:access:aud-nonce".to_vec();
+        let sig = sk.sign(&signing_digest(&v1));
+        let mut ser = vec![0x00];
+        ser.extend_from_slice(&sig.to_bytes());
+        ser.extend_from_slice(sk.verifying_key().as_bytes());
+        let token = BASE64_STANDARD.encode(
+            serde_json::to_vec(&json!({"address": address, "nonce": "aud-nonce", "signature": BASE64_STANDARD.encode(ser)})).unwrap(),
+        );
+        let store = NonceStore::in_memory(300, 10_000);
+        store.issue_specific("aud-nonce").await;
+        let res = verify_access_request(&cfg(false), &store, &token, &chain_ok()).await;
+        assert_eq!(res.unwrap_err(), Denied::BadSignature);
+
+        // An ownership gateway refuses a proof signed for single-use (consume line in the message).
+        let store = NonceStore::in_memory(300, 10_000);
+        store.issue_specific("aud-nonce").await;
+        let token = build_token(&sk, &address, "aud-nonce", Some(DIGEST));
+        let res = verify_access_request(&cfg(false), &store, &token, &chain_ok()).await;
+        assert_eq!(res.unwrap_err(), Denied::BadSignature);
+    }
+
+    #[tokio::test]
+    async fn single_use_refuses_a_swapped_consume_digest() {
+        let (sk, address) = keypair();
+        let store = NonceStore::in_memory(300, 10_000);
+        store.issue_specific("aud-nonce").await;
+        let signed = build_token(&sk, &address, "aud-nonce", Some(DIGEST));
+        let mut obj: serde_json::Value =
+            serde_json::from_slice(&BASE64_STANDARD.decode(signed).unwrap()).unwrap();
+        obj["consumeDigest"] = json!(format!("9{}", &DIGEST[1..]));
+        let token = BASE64_STANDARD.encode(serde_json::to_vec(&obj).unwrap());
+        let res = verify_access_request(&cfg(true), &store, &token, &chain_ok()).await;
+        assert_eq!(res.unwrap_err(), Denied::BadSignature);
     }
 }
