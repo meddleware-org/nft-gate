@@ -2,6 +2,12 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [0.0.20] - 2026-10-08
+
+### Changed
+
+- `@meddleware/access-gate-client` ^0.0.6 (strict event decoding, exact pass variants).
+
 ## [0.0.19] - 2026-10-08
 
 ### Changed (breaking: protocol v2, configuration)
