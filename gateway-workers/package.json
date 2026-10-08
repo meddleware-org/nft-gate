@@ -43,7 +43,7 @@
     "@cloudflare/workers-types": "~5.20260929.1",
     "eslint": "^10.11.0",
     "jiti": "^2.7.0",
-    "typescript": "^6.0.0",
+    "typescript": "^7.0.2",
     "typescript-eslint": "^8.71.0",
     "vitest": "~4.1.11",
     "wrangler": "^4.143.0"
