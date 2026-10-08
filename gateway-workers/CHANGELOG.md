@@ -2,6 +2,18 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [0.0.18] - 2026-10-08
+
+### Changed
+
+- Worker source: `noUncheckedIndexedAccess` is on, with the mechanical fixes it required (byte
+  loops iterate values; a missing row or capture group is handled explicitly in the nonce, rate and
+  redemption checks). No behaviour change.
+- `@meddleware/access-gate-client` 0.0.4 and `@meddleware/nft-gate-client` 0.0.15.
+- `@mysten/sui` is `^2.33.1` like every other package (it was `~2.33.1`).
+- Dev tooling: `source-map-js` 1.2.2 and a `sharp` 0.35.5 override (GHSA-68fv-2mgg-jv7q,
+  GHSA-wq5f-xc86-pv6w). Rust gateway unchanged (version alignment only).
+
 ## [0.0.17] - 2026-10-02
 
 ### Changed
