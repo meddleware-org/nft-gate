@@ -2,6 +2,12 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
+## [Unreleased]
+
+### Changed
+
+- `NFT_TYPE` and `GATE_ID` in `wrangler.toml` name the 2026-10-09 testnet publication (access_gate `0xd7ddaa94…`, relay gate `0x316f1bf9…`); deploy together with the apps' `VITE_ACCESS_GATE_ID_TESTNET`.
+
 ## [0.0.21] - 2026-10-08
 
 ### Fixed

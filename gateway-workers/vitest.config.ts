@@ -49,7 +49,7 @@ export default defineConfig({
                 SUI_RPC_URL: 'https://rpc.invalid',
                 // A plain var in production (wrangler.toml); required by the config loader.
                 NFT_TYPE:
-                  '0xa55789d77b8ae41e604c1c2e9ad9f7b034ca69b028ad0f1eee7d7cc8ad886d41::access_gate::SoulboundAccessNFT',
+                  '0xd7ddaa94b74330979b2b618fc81206d160a264f1c9ca148a77fa2144301388c9::access_gate::SoulboundAccessNFT',
                 ALLOWED_ORIGINS: 'https://allowed.example.com,https://sui-walrus.meddleware.co.uk',
               },
             },

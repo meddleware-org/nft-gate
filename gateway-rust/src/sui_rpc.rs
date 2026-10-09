@@ -655,7 +655,8 @@ mod tests {
 
     // Live end-to-end check against Sui testnet — the Rust analogue of the Workers real-chain
     // harness. Ignored by default (network); run with `cargo test -- --ignored`. Uses a known
-    // `access_gate::consume` on the current testnet package/gate (0xa55789… / 0xfd6c3b…). Public
+    // `access_gate::consume` on the superseded testnet package/gate (0xa55789… / 0xfd6c3b…, immutable
+    // since 2026-10-09; the transaction is a fixed historic fixture). Public
     // fullnodes prune old checkpoints: when this digest ages out (NOT_FOUND), replace it with a
     // recent one (`listEvents` on the AccessConsumedEvent type, descending).
     #[tokio::test]

@@ -49,11 +49,11 @@ GATEWAY_ORIGIN = "https://sui-walrus-relay-testnet.meddleware.co.uk"
 
 # Required: the pass type this gateway accepts, `<access_gate original id>::access_gate::AccessNFT`
 # or `…::SoulboundAccessNFT`. A public on-chain type, so a plain var (it was a secret until 0.0.14).
-NFT_TYPE = "0xa55789d77b8ae41e604c1c2e9ad9f7b034ca69b028ad0f1eee7d7cc8ad886d41::access_gate::SoulboundAccessNFT"
+NFT_TYPE = "0xd7ddaa94b74330979b2b618fc81206d160a264f1c9ca148a77fa2144301388c9::access_gate::SoulboundAccessNFT"
 # Required: the gate whose passes are accepted — the testnet Walrus relay gate on access_gate
-# 0xa55789… (version-gated, 2026-10-02). Change GATE_ID and NFT_TYPE only together with the apps' VITE_ACCESS_GATE_ID_TESTNET
+# 0xd7ddaa94… (2026-10-09). Change GATE_ID and NFT_TYPE only together with the apps' VITE_ACCESS_GATE_ID_TESTNET
 # (walrus-ui, dashboard, token-deployer-ui) — never one without the others.
-GATE_ID = "0xfd6c3b2a2baefcd8c3e08a2cddac942478e0527c421f4dc739917b01560ab8a6"
+GATE_ID = "0x316f1bf9764db352e925bb598aff44ea77be4ab652f0bd2eb3fdcc0a378faddc"
 SINGLE_USE = "true"
 PUBLIC_PATHS = "/v1/tip-config"
 RATE_LIMIT_PER_MIN = "30"
