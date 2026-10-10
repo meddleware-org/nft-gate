@@ -33,7 +33,11 @@ mod http_client;
 mod proof;
 mod proxy;
 mod ratelimit;
+#[cfg(test)]
+mod router_tests;
 mod sui_rpc;
+#[cfg(test)]
+mod testkit;
 mod verify;
 
 use axum::error_handling::HandleErrorLayer;
@@ -233,7 +237,7 @@ async fn handle(State(app): State<Arc<AppState>>, req: Request) -> Response {
 /// returns an owner token), proxy, then COMMIT on a successful upload or RELEASE on failure, both
 /// presenting the token — so an interrupted upload leaves the consume redeemable, a duplicate can't
 /// double-spend it, and a request whose lease lapsed can never clear or overwrite a newer holder's.
-/// The lease outlives the upstream deadline (checked at startup). A commit that fails, or finds its
+/// The lease outlives the body-read and upstream deadlines together (checked at startup). A commit that fails, or finds its
 /// lease lost, is a 502 (never success); a store error is a 503 (never a conflict).
 async fn redeem_and_forward(app: &AppState, key: &str, req: Request) -> Response {
     let unavailable = |e: anyhow::Error| {
@@ -363,7 +367,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = GatewayConfig::from_env()?;
-    tracing::info!(?cfg.bind_addr, upstream = %cfg.upstream_url, nft_type = %cfg.nft_type, single_use = cfg.single_use, "starting nft-gate-gateway");
+    // The upstream URL is deliberately not logged: it is the private origin (audit F26).
+    tracing::info!(?cfg.bind_addr, nft_type = %cfg.nft_type, single_use = cfg.single_use, "starting nft-gate-gateway");
 
     let http = HttpClient::new()?;
     let chain = SuiRpc::new(

@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22] - 2026-10-10
+
+Released with the Workers gateway 0.0.22 (one version for every artifact); parity fixes from the
+2026-10-09 audit. Still undeployed.
+
+### Fixed
+
+- Ownership mode reads every page of the owner's `ListOwnedObjects` list (up to `MAX_OWNED_PAGES` =
+  100 pages of 50, like the Workers gateway), stopping at the first usable pass; a longer list is a
+  chain error (502, denied) and the whole check shares one `RPC_TIMEOUT_SECS` deadline (F17).
+- Single-use verification requires the consume transaction's effects status to be success
+  (`effects.status` is read and checked), as the Workers gateway does, instead of inferring it from the
+  presence of events (F21).
+- `REDEMPTION_LEASE_TTL_SECS` must exceed `UPSTREAM_TIMEOUT_SECS + BODY_READ_TIMEOUT_SECS` (the lease is
+  held while the body is read and uploaded); the startup check used the upstream deadline alone (F46).
+
+### Security
+
+- The startup log no longer prints `UPSTREAM_URL`, and `GatewayConfig`'s `Debug` redacts the upstream and
+  RPC URLs; `UPSTREAM_URL` and `SUI_RPC_URL` carrying credentials (userinfo) are refused at startup, as
+  on the Workers gateway (F26).
+
+### Added
+
+- Tests: router-level tests against a scripted local Sui node and a recording upstream (coded `409`
+  redeemed/leased, `503` store errors, `502` chain error and lost lease, `403` failed or foreign consume,
+  `413`/`408`/`504`, redirects, path policy; F47); hermetic gRPC-web fixtures pinning the field numbers
+  of `GetTransaction`, `GetObject` and paged `ListOwnedObjects` (F45); the optional live checks take a
+  fresh consume from `NFT_GATE_LIVE_*` instead of a fixed, prunable digest.
+- Dev-dependency `futures-util` (already in the graph via axum) for streamed test bodies.
+
 ## [0.0.21] - 2026-10-08
 
 ### Fixed

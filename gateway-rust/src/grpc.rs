@@ -276,6 +276,15 @@ fn parse_status(v: &str) -> Option<i64> {
     v.trim().parse::<i64>().ok()
 }
 
+/// The protobuf message inside a single gRPC-web request frame (tests read what the client sent).
+#[cfg(test)]
+pub fn unframe_request_for_test(body: &[u8]) -> Vec<u8> {
+    assert_eq!(body[0], 0, "uncompressed data frame");
+    let len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+    assert_eq!(body.len(), 5 + len, "exactly one frame");
+    body[5..].to_vec()
+}
+
 /// Unframe a gRPC-web response: concatenate data frames (high bit of the flag clear) into the
 /// response message and read `grpc-status` from the trailer frame (high bit set) or, for a
 /// trailers-only response (how full nodes answer errors such as NOT_FOUND), from the HTTP headers.

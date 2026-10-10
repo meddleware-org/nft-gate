@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "nft-gate-gateway"
-version = "0.0.21"
+version = "0.0.22"
 dependencies = [
  "anyhow",
  "axum",
@@ -1081,6 +1081,7 @@ dependencies = [
  "bytes",
  "ed25519-consensus",
  "ed25519-dalek",
+ "futures-util",
  "hex",
  "http-body-util",
  "hyper",

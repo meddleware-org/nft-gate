@@ -1,6 +1,6 @@
 [package]
 name = "nft-gate-gateway"
-version = "0.0.21"
+version = "0.0.22"
 edition = "2021"
 # The dependency graph's floor (checked in CI by the `msrv` job).
 rust-version = "1.88"
@@ -50,6 +50,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt", "macros"] }
 # Signing only (test fixtures); verification uses ed25519-consensus.
 ed25519-dalek = "3"
+# Streaming request bodies in the router tests (already in the graph via axum).
+futures-util = { version = "0.3", default-features = false }
 # Property tests for the hand-rolled protobuf / gRPC-web readers (no panics on any input).
 proptest = "1"
 

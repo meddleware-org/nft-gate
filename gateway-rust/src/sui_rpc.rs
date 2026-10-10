@@ -12,7 +12,7 @@ use crate::grpc::{
     field_bytes, field_str, value_as_bool, value_field, value_find_string, Field, GrpcStatus,
     GrpcWeb, ProtoReader, ProtoWriter, GRPC_NOT_FOUND,
 };
-use crate::http_client::HttpClient;
+use crate::http_client::{HttpClient, TimedOut};
 use crate::verify::{normalize_address, normalize_move_type, ChainQuery};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -35,8 +35,12 @@ const REQ_READ_MASK: u32 = 2;
 const FIELDMASK_PATHS: u32 = 1;
 // GetTransactionResponse { ExecutedTransaction transaction = 1 }
 const RESP_TRANSACTION: u32 = 1;
-// ExecutedTransaction { ... TransactionEvents events = 5 }
+// ExecutedTransaction { ... TransactionEffects effects = 4; TransactionEvents events = 5 }
+const EXECUTED_EFFECTS: u32 = 4;
 const EXECUTED_EVENTS: u32 = 5;
+// TransactionEffects { ... ExecutionStatus status = 4 }; ExecutionStatus { optional bool success = 1 }
+const EFFECTS_STATUS: u32 = 4;
+const STATUS_SUCCESS: u32 = 1;
 // TransactionEvents { ... repeated Event events = 3 }
 const EVENTS_EVENTS: u32 = 3;
 // Event { package_id=1; module=2; sender=3; event_type=4; Bcs contents=5; Value json=6 }
@@ -44,16 +48,25 @@ const EVENT_SENDER: u32 = 3;
 const EVENT_TYPE: u32 = 4;
 const EVENT_JSON: u32 = 6;
 
-// ListOwnedObjectsRequest { owner=1; uint32 page_size=2; FieldMask read_mask=4; object_type=5 }
+// ListOwnedObjectsRequest { owner=1; uint32 page_size=2; bytes page_token=3; FieldMask read_mask=4;
+// object_type=5 }
 const LOO_OWNER: u32 = 1;
 const LOO_PAGE_SIZE: u32 = 2;
+const LOO_PAGE_TOKEN: u32 = 3;
 const LOO_READ_MASK: u32 = 4;
 const LOO_OBJECT_TYPE: u32 = 5;
-// ListOwnedObjectsResponse { repeated Object objects = 1 }
+// ListOwnedObjectsResponse { repeated Object objects = 1; bytes next_page_token = 2 }
 const LOO_OBJECTS: u32 = 1;
+const LOO_NEXT_PAGE_TOKEN: u32 = 2;
 // Object { ... Value json = 100 }
 const OBJECT_JSON: u32 = 100;
 
+/// Objects requested per `ListOwnedObjects` page.
+const OWNED_PAGE_SIZE: u64 = 50;
+/// Pages read before the ownership list is judged too long to decide (the Workers gateway's
+/// `MAX_OWNED_PAGES`: the same pass is admitted or refused by both). With 50 per page, 5,000 objects
+/// of the pass type; past it the check errors (→ 502, denied) instead of guessing.
+pub const MAX_OWNED_PAGES: usize = 100;
 /// `GetTransaction` attempts while the node still reports the digest as unknown (indexing lag).
 const TX_FETCH_ATTEMPTS: u32 = 4;
 /// Entries kept by the ownership cache; the oldest is dropped past it.
@@ -72,6 +85,8 @@ struct CacheEntry {
 /// Production [`ChainQuery`] backed by the Sui gRPC API (gRPC-web transport).
 pub struct SuiRpc {
     grpc: GrpcWeb,
+    /// Deadline for one gated ownership check (all of its pages), as for each other call.
+    timeout: Duration,
     cache_ttl: Duration,
     cache: Mutex<HashMap<String, CacheEntry>>,
 }
@@ -88,6 +103,7 @@ impl SuiRpc {
     ) -> Self {
         Self {
             grpc: GrpcWeb::new(client, rpc_url, auth, timeout),
+            timeout,
             cache_ttl: Duration::from_millis(cache_ttl_ms),
             cache: Mutex::new(HashMap::new()),
         }
@@ -97,27 +113,65 @@ impl SuiRpc {
         format!("{address}|{nft_type}|{}", gate_id.unwrap_or("-"))
     }
 
-    /// Uncached, live ownership query via `StateService/ListOwnedObjects`.
+    /// Uncached, live ownership query via `StateService/ListOwnedObjects`, bounded by one deadline
+    /// for all pages.
     async fn owns_nft_live(
         &self,
         address: &str,
         nft_type: &str,
         gate_id: Option<&str>,
     ) -> anyhow::Result<bool> {
-        let mut mask = ProtoWriter::new();
-        mask.string_field(FIELDMASK_PATHS, "object_type");
-        mask.string_field(FIELDMASK_PATHS, "json");
-        let mut req = ProtoWriter::new();
-        req.string_field(LOO_OWNER, address);
-        req.uint_field(LOO_PAGE_SIZE, 50);
-        req.bytes_field(LOO_READ_MASK, &mask.into_bytes());
-        req.string_field(LOO_OBJECT_TYPE, nft_type);
-        let resp = self
-            .grpc
-            .call(STATE_LIST_OWNED_OBJECTS, req.into_bytes())
-            .await?;
-        Ok(response_has_owned(&resp, gate_id))
+        tokio::time::timeout(self.timeout, self.scan_owned(address, nft_type, gate_id))
+            .await
+            .map_err(|_| anyhow::Error::new(TimedOut))?
     }
+
+    /// Read the owner's objects of `nft_type` page by page (at most [`MAX_OWNED_PAGES`]) and stop at
+    /// the first usable pass for the gate. Past the bound the answer is an error, never "no": a
+    /// holder's pass may sit on a page that was not read, and guessing either way is wrong.
+    async fn scan_owned(
+        &self,
+        address: &str,
+        nft_type: &str,
+        gate_id: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let mut page_token: Option<Vec<u8>> = None;
+        for _ in 0..MAX_OWNED_PAGES {
+            let resp = self
+                .grpc
+                .call(
+                    STATE_LIST_OWNED_OBJECTS,
+                    build_list_owned(address, nft_type, page_token.as_deref()),
+                )
+                .await?;
+            if response_has_owned(&resp, gate_id) {
+                return Ok(true);
+            }
+            match field_bytes(&resp, LOO_NEXT_PAGE_TOKEN).filter(|t| !t.is_empty()) {
+                Some(token) => page_token = Some(token.to_vec()),
+                None => return Ok(false),
+            }
+        }
+        anyhow::bail!(
+            "owned-object list exceeds {MAX_OWNED_PAGES} pages; refusing to decide ownership"
+        )
+    }
+}
+
+/// Build one `ListOwnedObjectsRequest` page for `address`, continuing from `page_token`.
+fn build_list_owned(address: &str, nft_type: &str, page_token: Option<&[u8]>) -> Vec<u8> {
+    let mut mask = ProtoWriter::new();
+    mask.string_field(FIELDMASK_PATHS, "object_type");
+    mask.string_field(FIELDMASK_PATHS, "json");
+    let mut req = ProtoWriter::new();
+    req.string_field(LOO_OWNER, address);
+    req.uint_field(LOO_PAGE_SIZE, OWNED_PAGE_SIZE);
+    if let Some(token) = page_token {
+        req.bytes_field(LOO_PAGE_TOKEN, token);
+    }
+    req.bytes_field(LOO_READ_MASK, &mask.into_bytes());
+    req.string_field(LOO_OBJECT_TYPE, nft_type);
+    req.into_bytes()
 }
 
 /// True if a `Gate`'s JSON (`google.protobuf.Value`) is paused AND its `policy` has
@@ -145,9 +199,10 @@ fn response_gate_blocks_access(resp: &[u8]) -> anyhow::Result<bool> {
     gate_blocks_access(json)
 }
 
-/// Build the `GetTransactionRequest` for `digest`, requesting only the events.
+/// Build the `GetTransactionRequest` for `digest`, requesting only the execution status and events.
 fn build_get_transaction(digest: &str) -> Vec<u8> {
     let mut mask = ProtoWriter::new();
+    mask.string_field(FIELDMASK_PATHS, "effects.status");
     mask.string_field(FIELDMASK_PATHS, "events");
     let mut req = ProtoWriter::new();
     req.string_field(REQ_DIGEST, digest);
@@ -196,9 +251,19 @@ fn same_address(a: Option<&str>, b: &str) -> bool {
     a.is_some_and(|a| normalize_address(a) == normalize_address(b))
 }
 
-/// True if a `GetTransactionResponse` contains an event of exactly `consumed_type` sent by
-/// `address` for `gate_id` (when constrained). A failed transaction emits no events, so the
-/// presence of a matching event already implies success — no separate status check is needed.
+/// True if the executed transaction's effects report success. The status is decided from the
+/// effects, as the Workers gateway does (`status.success`), not inferred from the presence of
+/// events: a missing effects block, status or `success` field, or `success = false`, is a failure.
+fn effects_succeeded(tx: &[u8]) -> bool {
+    field_bytes(tx, EXECUTED_EFFECTS)
+        .and_then(|effects| field_bytes(effects, EFFECTS_STATUS))
+        .is_some_and(|status| {
+            ProtoReader::new(status).any(|f| matches!(f, Field::Varint(STATUS_SUCCESS, 1)))
+        })
+}
+
+/// True if a `GetTransactionResponse` is a SUCCESSFUL transaction (effects status) containing an
+/// event of exactly `consumed_type` sent by `address` for `gate_id` (when constrained).
 fn response_has_consume(
     resp: &[u8],
     address: &str,
@@ -211,6 +276,9 @@ fn response_has_consume(
     let Some(tx) = field_bytes(resp, RESP_TRANSACTION) else {
         return false;
     };
+    if !effects_succeeded(tx) {
+        return false;
+    }
     let Some(events) = field_bytes(tx, EXECUTED_EVENTS) else {
         return false;
     };
@@ -367,26 +435,10 @@ impl ChainQuery for SuiRpc {
 mod tests {
     use super::*;
     use crate::grpc::ProtoWriter;
+    use crate::testkit::{gate_json, string_struct, string_value, struct_of, Reply, Stub};
 
-    // google.protobuf.Value { string_value=3; struct_value=5 } / Struct { fields=1 { key=1; value=2 } }
     const NOW: u64 = 1_800_000_000_000;
     const MAX_AGE: u64 = 3600;
-
-    /// A struct `Value` of string fields.
-    fn string_struct(fields: &[(&str, &str)]) -> Vec<u8> {
-        let mut s = ProtoWriter::new();
-        for (k, v) in fields {
-            let mut val = ProtoWriter::new();
-            val.string_field(3, v); // string_value
-            let mut entry = ProtoWriter::new();
-            entry.string_field(1, k);
-            entry.bytes_field(2, &val.into_bytes());
-            s.bytes_field(1, &entry.into_bytes());
-        }
-        let mut value = ProtoWriter::new();
-        value.bytes_field(5, &s.into_bytes()); // struct_value
-        value.into_bytes()
-    }
 
     /// An event / NFT json with a gate id (and, for events, a recent timestamp).
     fn json_gate(gate: &str) -> Vec<u8> {
@@ -404,17 +456,30 @@ mod tests {
         ev.into_bytes()
     }
 
-    /// Build a GetTransactionResponse { transaction { events { events: [event...] } } }.
-    fn tx_response(events: &[Vec<u8>]) -> Vec<u8> {
+    /// A `GetTransactionResponse { transaction { effects { status { success } } events { events } } }`;
+    /// `success` is the effects status (`None` leaves the status out altogether).
+    fn tx_response_with_status(events: &[Vec<u8>], success: Option<bool>) -> Vec<u8> {
         let mut te = ProtoWriter::new();
         for e in events {
             te.bytes_field(EVENTS_EVENTS, e);
         }
         let mut tx = ProtoWriter::new();
+        if let Some(ok) = success {
+            let mut status = ProtoWriter::new();
+            status.uint_field(STATUS_SUCCESS, u64::from(ok));
+            let mut effects = ProtoWriter::new();
+            effects.bytes_field(EFFECTS_STATUS, &status.into_bytes());
+            tx.bytes_field(EXECUTED_EFFECTS, &effects.into_bytes());
+        }
         tx.bytes_field(EXECUTED_EVENTS, &te.into_bytes());
         let mut resp = ProtoWriter::new();
         resp.bytes_field(RESP_TRANSACTION, &tx.into_bytes());
         resp.into_bytes()
+    }
+
+    /// A successful transaction carrying `events`.
+    fn tx_response(events: &[Vec<u8>]) -> Vec<u8> {
+        tx_response_with_status(events, Some(true))
     }
 
     const CONSUMED: &str = "0xabc::access_gate::AccessConsumedEvent";
@@ -539,7 +604,299 @@ mod tests {
         let req = build_get_transaction("DIGEST123");
         assert_eq!(field_str(&req, REQ_DIGEST), Some("DIGEST123"));
         let mask = field_bytes(&req, REQ_READ_MASK).unwrap();
-        assert_eq!(field_str(mask, FIELDMASK_PATHS), Some("events"));
+        let paths: Vec<&str> = ProtoReader::new(mask)
+            .filter_map(|f| match f {
+                Field::Len(FIELDMASK_PATHS, p) => std::str::from_utf8(p).ok(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paths, ["effects.status", "events"]);
+    }
+
+    #[test]
+    fn only_a_successful_transaction_can_be_a_consume() {
+        let ev = event(CONSUMED, OWNER, GATE);
+        let check =
+            |resp: &[u8]| response_has_consume(resp, OWNER, CONSUMED, Some(GATE), NOW, MAX_AGE);
+        assert!(check(&tx_response_with_status(
+            std::slice::from_ref(&ev),
+            Some(true)
+        )));
+        // A reported failure, a missing status and a missing effects block all fail closed, even
+        // with a matching event in the response (audit F21).
+        assert!(!check(&tx_response_with_status(
+            std::slice::from_ref(&ev),
+            Some(false)
+        )));
+        assert!(!check(&tx_response_with_status(&[ev], None)));
+        // `ExecutionStatus` without its `success` field (an error-only status) is not success.
+        let mut status = ProtoWriter::new();
+        status.string_field(2, "error");
+        let mut effects = ProtoWriter::new();
+        effects.bytes_field(EFFECTS_STATUS, &status.into_bytes());
+        let mut tx = ProtoWriter::new();
+        tx.bytes_field(EXECUTED_EFFECTS, &effects.into_bytes());
+        let mut te = ProtoWriter::new();
+        te.bytes_field(EVENTS_EVENTS, &event(CONSUMED, OWNER, GATE));
+        tx.bytes_field(EXECUTED_EVENTS, &te.into_bytes());
+        let mut resp = ProtoWriter::new();
+        resp.bytes_field(RESP_TRANSACTION, &tx.into_bytes());
+        assert!(!check(&resp.into_bytes()));
+    }
+
+    #[test]
+    fn build_list_owned_encodes_the_page_token_only_when_continuing() {
+        let first = build_list_owned("0xa", "0x1::access_gate::AccessNFT", None);
+        assert_eq!(field_str(&first, LOO_OWNER), Some("0xa"));
+        assert_eq!(
+            field_str(&first, LOO_OBJECT_TYPE),
+            Some("0x1::access_gate::AccessNFT")
+        );
+        assert!(field_bytes(&first, LOO_PAGE_TOKEN).is_none());
+        let next = build_list_owned("0xa", "0x1::access_gate::AccessNFT", Some(b"\x01tok"));
+        assert_eq!(field_bytes(&next, LOO_PAGE_TOKEN), Some(&b"\x01tok"[..]));
+    }
+
+    // ── hermetic gRPC-web fixtures: SuiRpc against a scripted local node ──────────────────────
+    // These pin the wire format with LITERAL field numbers (not the constants above), so a changed
+    // constant fails here, and they need no network and no historic transaction (audit F45).
+
+    const PASS_TYPE: &str = "0xabc::access_gate::SoulboundAccessNFT";
+
+    fn rpc_for(stub: &Stub) -> SuiRpc {
+        SuiRpc::new(
+            HttpClient::new().unwrap(),
+            stub.url.clone(),
+            0,
+            None,
+            Duration::from_secs(5),
+        )
+    }
+
+    /// A `ListOwnedObjectsResponse` of `variants` passes, with an optional next-page token.
+    fn owned_page(variants: &[&[(&str, &str)]], next: Option<&[u8]>) -> Vec<u8> {
+        let mut resp = ProtoWriter::new();
+        for v in variants {
+            let mut obj = ProtoWriter::new();
+            obj.bytes_field(100, &nft_json(v)); // Object.json = 100
+            resp.bytes_field(1, &obj.into_bytes()); // objects = 1
+        }
+        if let Some(t) = next {
+            resp.bytes_field(2, t); // next_page_token = 2
+        }
+        resp.into_bytes()
+    }
+
+    const EXHAUSTED: &[(&str, &str)] = &[("@variant", "SingleUse"), ("uses_remaining", "0")];
+    const UNLIMITED: &[(&str, &str)] = &[("@variant", "UnlimitedPass")];
+
+    /// The request fields of a `ListOwnedObjects` call, read with literal field numbers.
+    fn list_request(body: &[u8]) -> (String, u64, Option<Vec<u8>>, String) {
+        let msg = crate::grpc::unframe_request_for_test(body);
+        let page_size = ProtoReader::new(&msg)
+            .find_map(|f| match f {
+                Field::Varint(2, n) => Some(n),
+                _ => None,
+            })
+            .unwrap();
+        (
+            field_str(&msg, 1).unwrap().to_string(),
+            page_size,
+            field_bytes(&msg, 3).map(<[u8]>::to_vec),
+            field_str(&msg, 5).unwrap().to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn ownership_is_read_across_pages_until_a_usable_pass() {
+        // Page 1: only an exhausted receipt, more to read. Page 2: a usable pass (audit F17).
+        let stub = Stub::spawn(|seen| match list_request(&seen.body).2.as_deref() {
+            None => Reply::grpc(&owned_page(&[EXHAUSTED], Some(b"page-2"))),
+            Some(b"page-2") => Reply::grpc(&owned_page(&[EXHAUSTED, UNLIMITED], None)),
+            Some(other) => panic!("unexpected token {other:?}"),
+        })
+        .await;
+        let rpc = rpc_for(&stub);
+        assert!(rpc
+            .owns_nft("0xa11ce", PASS_TYPE, Some(GATE))
+            .await
+            .unwrap());
+        let calls = stub.seen_at("/sui.rpc.v2.StateService/ListOwnedObjects");
+        assert_eq!(calls.len(), 2);
+        let (owner, size, token, ty) = list_request(&calls[0].body);
+        assert_eq!(
+            (owner.as_str(), size, token, ty.as_str()),
+            ("0xa11ce", 50, None, PASS_TYPE)
+        );
+        assert_eq!(
+            list_request(&calls[1].body).2.as_deref(),
+            Some(&b"page-2"[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pass_on_the_first_page_stops_the_scan() {
+        let stub = Stub::spawn(|_| Reply::grpc(&owned_page(&[UNLIMITED], Some(b"more")))).await;
+        assert!(rpc_for(&stub)
+            .owns_nft("0xa11ce", PASS_TYPE, Some(GATE))
+            .await
+            .unwrap());
+        assert_eq!(stub.seen().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_last_page_without_a_usable_pass_is_not_ownership() {
+        let stub = Stub::spawn(|seen| match list_request(&seen.body).2 {
+            None => Reply::grpc(&owned_page(&[EXHAUSTED], Some(b"p2"))),
+            Some(_) => Reply::grpc(&owned_page(&[EXHAUSTED], Some(b""))), // empty token = end
+        })
+        .await;
+        assert!(!rpc_for(&stub)
+            .owns_nft("0xa11ce", PASS_TYPE, Some(GATE))
+            .await
+            .unwrap());
+        assert_eq!(stub.seen().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_endless_list_is_an_error_after_the_page_bound() {
+        // Every page names a next page and holds nothing usable: past MAX_OWNED_PAGES the answer
+        // is an error (502, denied), never a silent "no" or "yes".
+        let stub = Stub::spawn(|_| Reply::grpc(&owned_page(&[EXHAUSTED], Some(b"again")))).await;
+        let err = rpc_for(&stub)
+            .owns_nft("0xa11ce", PASS_TYPE, Some(GATE))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("pages"), "{err}");
+        assert_eq!(stub.seen().len(), MAX_OWNED_PAGES);
+    }
+
+    #[tokio::test]
+    async fn a_node_error_on_a_later_page_fails_the_check() {
+        let stub = Stub::spawn(|seen| match list_request(&seen.body).2 {
+            None => Reply::grpc(&owned_page(&[EXHAUSTED], Some(b"p2"))),
+            Some(_) => Reply::grpc_status(14), // UNAVAILABLE
+        })
+        .await;
+        assert!(rpc_for(&stub)
+            .owns_nft("0xa11ce", PASS_TYPE, Some(GATE))
+            .await
+            .is_err());
+    }
+
+    /// Fields of a `GetTransaction` request, read with literal field numbers.
+    fn get_tx_request(body: &[u8]) -> (String, Vec<String>) {
+        let msg = crate::grpc::unframe_request_for_test(body);
+        let mask = field_bytes(&msg, 2).unwrap();
+        let paths = ProtoReader::new(mask)
+            .filter_map(|f| match f {
+                Field::Len(1, p) => Some(String::from_utf8(p.to_vec()).unwrap()),
+                _ => None,
+            })
+            .collect();
+        (field_str(&msg, 1).unwrap().to_string(), paths)
+    }
+
+    /// A node answering `GetTransaction` with a canned response, and recording the request.
+    async fn tx_node(response: Vec<u8>) -> Stub {
+        Stub::spawn(move |_| Reply::grpc(&response)).await
+    }
+
+    #[tokio::test]
+    async fn consume_verification_reads_a_response_in_the_pinned_wire_format() {
+        // The response is built with literal field numbers: GetTransactionResponse.transaction = 1,
+        // ExecutedTransaction.effects = 4 { status = 4 { success = 1 } }, .events = 5 { events = 3 }.
+        let json = string_struct(&[("gate_id", GATE), ("timestamp_ms", &now_ms().to_string())]);
+        let mut ev = ProtoWriter::new();
+        ev.string_field(3, OWNER);
+        ev.string_field(4, CONSUMED);
+        ev.bytes_field(6, &json);
+        let mut events = ProtoWriter::new();
+        events.bytes_field(3, &ev.into_bytes());
+        let mut status = ProtoWriter::new();
+        status.uint_field(1, 1);
+        let mut effects = ProtoWriter::new();
+        effects.bytes_field(4, &status.into_bytes());
+        let mut tx = ProtoWriter::new();
+        tx.bytes_field(4, &effects.into_bytes());
+        tx.bytes_field(5, &events.into_bytes());
+        let mut resp = ProtoWriter::new();
+        resp.bytes_field(1, &tx.into_bytes());
+        let stub = tx_node(resp.into_bytes()).await;
+        let rpc = rpc_for(&stub);
+        let digest = "5Wq9tE4gXz8hEvFhYt8KkTJb2Pp6qXqj8cRk3xN1mYdL";
+        assert!(rpc
+            .consume_tx_valid(digest, OWNER, CONSUMED, Some(GATE), 3600)
+            .await
+            .unwrap());
+        // Other sender, gate and a look-alike package are refused against the same response.
+        assert!(!rpc
+            .consume_tx_valid(digest, "0x01", CONSUMED, Some(GATE), 3600)
+            .await
+            .unwrap());
+        assert!(!rpc
+            .consume_tx_valid(digest, OWNER, CONSUMED, Some("0xdead"), 3600)
+            .await
+            .unwrap());
+        assert!(!rpc
+            .consume_tx_valid(
+                digest,
+                OWNER,
+                "0xbad::access_gate::AccessConsumedEvent",
+                Some(GATE),
+                3600
+            )
+            .await
+            .unwrap());
+        // The request names the digest (field 1) and masks to exactly what is read (field 2).
+        let first = &stub.seen_at("/sui.rpc.v2.LedgerService/GetTransaction")[0];
+        let (d, paths) = get_tx_request(&first.body);
+        assert_eq!(d, digest);
+        assert_eq!(paths, ["effects.status", "events"]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_transaction_with_a_matching_event_is_not_a_consume() {
+        let ev = event(CONSUMED, OWNER, GATE);
+        let stub = tx_node(tx_response_with_status(&[ev], Some(false))).await;
+        assert!(!rpc_for(&stub)
+            .consume_tx_valid("DIGEST", OWNER, CONSUMED, Some(GATE), 3600)
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn only_not_found_is_retried_and_ends_as_denied() {
+        let stub = Stub::spawn(|_| Reply::grpc_status(GRPC_NOT_FOUND)).await;
+        let ok = rpc_for(&stub)
+            .consume_tx_valid("DIGEST", OWNER, CONSUMED, Some(GATE), 3600)
+            .await
+            .unwrap();
+        assert!(!ok);
+        assert_eq!(stub.seen().len(), TX_FETCH_ATTEMPTS as usize);
+        // Any other status is a chain error at once: no retries.
+        let stub = Stub::spawn(|_| Reply::grpc_status(14)).await;
+        assert!(rpc_for(&stub)
+            .consume_tx_valid("DIGEST", OWNER, CONSUMED, Some(GATE), 3600)
+            .await
+            .is_err());
+        assert_eq!(stub.seen().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn gate_read_uses_the_pinned_get_object_wire_format() {
+        // GetObjectRequest { object_id = 1; read_mask = 3 }, GetObjectResponse { object = 1 { json = 100 } }.
+        let mut obj = ProtoWriter::new();
+        obj.bytes_field(100, &gate_json(true, Some(true)));
+        let mut resp = ProtoWriter::new();
+        resp.bytes_field(1, &obj.into_bytes());
+        let body = resp.into_bytes();
+        let stub = Stub::spawn(move |_| Reply::grpc(&body)).await;
+        assert!(rpc_for(&stub).gate_access_blocked("0x6a7e").await.unwrap());
+        let req = crate::grpc::unframe_request_for_test(&stub.seen()[0].body);
+        assert_eq!(field_str(&req, 1), Some("0x6a7e"));
+        assert_eq!(field_str(field_bytes(&req, 3).unwrap(), 1), Some("json"));
     }
 
     #[test]
@@ -601,12 +958,6 @@ mod tests {
         struct_of(&[("data", data)])
     }
 
-    fn string_value(s: &str) -> Vec<u8> {
-        let mut v = ProtoWriter::new();
-        v.string_field(3, s);
-        v.into_bytes()
-    }
-
     #[test]
     fn only_usable_passes_count() {
         assert!(pass_is_usable(&nft_json(&[("@variant", "UnlimitedPass")])));
@@ -653,89 +1004,103 @@ mod tests {
         ));
     }
 
-    // Live end-to-end check against Sui testnet — the Rust analogue of the Workers real-chain
-    // harness. Ignored by default (network); run with `cargo test -- --ignored`. Uses a known
-    // `access_gate::consume` on the superseded testnet package/gate (0xa55789… / 0xfd6c3b…, immutable
-    // since 2026-10-09; the transaction is a fixed historic fixture). Public
-    // fullnodes prune old checkpoints: when this digest ages out (NOT_FOUND), replace it with a
-    // recent one (`listEvents` on the AccessConsumedEvent type, descending).
-    #[tokio::test]
-    #[ignore = "hits Sui testnet gRPC; run with --ignored"]
-    async fn live_consume_tx_valid() {
-        use crate::http_client::HttpClient;
-        use crate::verify::{consumed_event_type, ChainQuery};
-        let rpc = SuiRpc::new(
+    // ── optional live checks against a real full node ──────────────────────────────────────────
+    // Ignored by default (network): `cargo test -- --ignored live_`. The hermetic fixtures above
+    // already pin the wire format in CI; these confirm the field numbers against a real node.
+    //
+    // `live_gate_and_ownership_requests_are_accepted` needs no fixture: the current testnet relay
+    // gate is a long-lived shared object. `live_consume_tx_valid` replays a recent
+    // `access_gate::consume`; public fullnodes prune old checkpoints within about a week, so it
+    // takes the transaction from the environment instead of a fixed digest (audit F45):
+    //   NFT_GATE_LIVE_DIGEST   digest of a recent consume (listEvents on the AccessConsumedEvent
+    //                          type, descending, on the same network)
+    //   NFT_GATE_LIVE_SENDER   the consume's sender address
+    //   NFT_GATE_LIVE_GATE     the gate id the consume was for
+    //   NFT_GATE_LIVE_PACKAGE  the access_gate package (original id) that emitted the event
+    //   NFT_GATE_LIVE_RPC      full-node URL (default https://fullnode.testnet.sui.io:443)
+    // Unset DIGEST: the test says so and returns without asserting.
+
+    fn live_rpc() -> SuiRpc {
+        SuiRpc::new(
             HttpClient::new().unwrap(),
-            "https://fullnode.testnet.sui.io:443".to_string(),
+            std::env::var("NFT_GATE_LIVE_RPC")
+                .unwrap_or_else(|_| "https://fullnode.testnet.sui.io:443".to_string()),
             0,
             None,
             Duration::from_secs(15),
-        );
-        let pkg = "0xa55789d77b8ae41e604c1c2e9ad9f7b034ca69b028ad0f1eee7d7cc8ad886d41";
+        )
+    }
+
+    #[tokio::test]
+    #[ignore = "hits a Sui full node; run with --ignored"]
+    async fn live_gate_and_ownership_requests_are_accepted() {
+        use crate::verify::ChainQuery;
+        // The testnet relay gate published 2026-10-09 (see gateway-workers/wrangler.toml).
+        let gate = std::env::var("NFT_GATE_LIVE_GATE").unwrap_or_else(|_| {
+            "0x316f1bf9764db352e925bb598aff44ea77be4ab652f0bd2eb3fdcc0a378faddc".to_string()
+        });
+        let pkg = std::env::var("NFT_GATE_LIVE_PACKAGE").unwrap_or_else(|_| {
+            "0xd7ddaa94b74330979b2b618fc81206d160a264f1c9ca148a77fa2144301388c9".to_string()
+        });
+        let rpc = live_rpc();
+        // GetObject field numbers and the Gate JSON shape: a node that rejected either would error.
+        rpc.gate_access_blocked(&gate).await.unwrap();
+        // ListOwnedObjects field numbers: an address that owns no pass is a clean `false`.
+        assert!(!rpc
+            .owns_nft(
+                "0x0000000000000000000000000000000000000000000000000000000000000001",
+                &format!("{pkg}::access_gate::SoulboundAccessNFT"),
+                Some(&gate),
+            )
+            .await
+            .unwrap());
+    }
+
+    #[tokio::test]
+    #[ignore = "hits a Sui full node; run with --ignored"]
+    async fn live_consume_tx_valid() {
+        use crate::verify::{consumed_event_type, ChainQuery};
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let Some(digest) = env("NFT_GATE_LIVE_DIGEST") else {
+            eprintln!("live_consume_tx_valid: NFT_GATE_LIVE_DIGEST is not set; nothing to check");
+            return;
+        };
+        let (Some(addr), Some(gate), Some(pkg)) = (
+            env("NFT_GATE_LIVE_SENDER"),
+            env("NFT_GATE_LIVE_GATE"),
+            env("NFT_GATE_LIVE_PACKAGE"),
+        ) else {
+            panic!("set NFT_GATE_LIVE_SENDER, NFT_GATE_LIVE_GATE and NFT_GATE_LIVE_PACKAGE too");
+        };
+        let rpc = live_rpc();
         let consumed = consumed_event_type(&format!("{pkg}::access_gate::SoulboundAccessNFT"));
-        let digest = "8br5PGrzidRpW6NJ5s4KHAar6j9ct3AkuMNeJh3TgUkP";
-        let addr = "0xa991ae11b0785718cd3ad1c616e804a4c083f431b3144bb845bdec651164864a";
-        let gate = "0xfd6c3b2a2baefcd8c3e08a2cddac942478e0527c421f4dc739917b01560ab8a6";
+        let ten_years = 315_360_000;
         assert!(rpc
-            .consume_tx_valid(digest, addr, &consumed, Some(gate), 31_536_000)
+            .consume_tx_valid(&digest, &addr, &consumed, Some(&gate), ten_years)
             .await
             .unwrap());
         assert!(!rpc
-            .consume_tx_valid(digest, "0x01", &consumed, Some(gate), 31_536_000)
+            .consume_tx_valid(&digest, "0x01", &consumed, Some(&gate), ten_years)
             .await
             .unwrap());
         assert!(!rpc
-            .consume_tx_valid(digest, addr, &consumed, Some("0xdead"), 31_536_000)
+            .consume_tx_valid(&digest, &addr, &consumed, Some("0xdead"), ten_years)
             .await
             .unwrap());
         // A look-alike package's event type never matches.
         assert!(!rpc
             .consume_tx_valid(
-                digest,
-                addr,
+                &digest,
+                &addr,
                 "0xbad::access_gate::AccessConsumedEvent",
-                Some(gate),
-                31_536_000
+                Some(&gate),
+                ten_years
             )
             .await
             .unwrap());
     }
 
     // ── gate_blocks_access ──────────────────────────────────────────────────────────────────
-
-    /// A struct `Value` from (key, Value-bytes) entries.
-    fn struct_of(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
-        let mut s = ProtoWriter::new();
-        for (k, v) in entries {
-            let mut entry = ProtoWriter::new();
-            entry.string_field(1, k);
-            entry.bytes_field(2, v);
-            s.bytes_field(1, &entry.into_bytes());
-        }
-        let mut value = ProtoWriter::new();
-        value.bytes_field(5, &s.into_bytes());
-        value.into_bytes()
-    }
-
-    fn bool_value(b: bool) -> Vec<u8> {
-        let mut v = ProtoWriter::new();
-        v.uint_field(4, u64::from(b)); // bool_value
-        v.into_bytes()
-    }
-
-    fn gate_json(paused: bool, policy: Option<bool>) -> Vec<u8> {
-        let mut entries = vec![("paused", bool_value(paused))];
-        if let Some(blocks) = policy {
-            entries.push((
-                "policy",
-                struct_of(&[
-                    ("pause_blocks_decryption", bool_value(false)),
-                    ("pause_blocks_access", bool_value(blocks)),
-                ]),
-            ));
-        }
-        struct_of(&entries)
-    }
 
     #[test]
     fn gate_blocks_only_when_paused_and_policy_opts_in() {

@@ -44,7 +44,7 @@
 //! - `NONCE_PRUNE_INTERVAL_SECS` — background prune cadence for in-memory store (default: `60`).
 //! - `OWNERSHIP_CACHE_TTL_MS` — ownership-cache TTL in ms, 0 to disable (default: `0`).
 //! - `REDEMPTION_LEASE_TTL_SECS` — single-use: lease window for an in-flight consume-digest
-//!   redemption (default: `900`); must exceed `UPSTREAM_TIMEOUT_SECS`.
+//!   redemption (default: `900`); must exceed `UPSTREAM_TIMEOUT_SECS + BODY_READ_TIMEOUT_SECS`.
 //! - `REDEMPTION_RETENTION_SECS` — single-use: how long a committed (spent) consume-digest is
 //!   remembered to block re-redemption (default: `2592000` = 30 days).
 //! - `MAX_CONCURRENT_REQUESTS` — in-flight request cap; excess requests get `503` at once
@@ -144,8 +144,8 @@ pub struct GatewayConfig {
     pub sui_rpc_auth_header: Option<AuthHeader>,
 }
 
-/// Hand-written so logs never carry credentials: header values and the Redis URL (which may embed
-/// a password) are redacted.
+/// Hand-written so logs never carry credentials or the private origin: header values, the Redis URL
+/// (which may embed a password), the upstream URL and the RPC URL are redacted.
 impl std::fmt::Debug for GatewayConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names: Vec<&str> = self
@@ -157,8 +157,10 @@ impl std::fmt::Debug for GatewayConfig {
             .field("bind_addr", &self.bind_addr)
             .field("gateway_origin", &self.gateway_origin)
             .field("network", &self.network)
-            .field("upstream_url", &self.upstream_url)
-            .field("sui_rpc_url", &self.sui_rpc_url)
+            // The private origin is not logged (audit F26), and an RPC URL may carry a key in its
+            // path: neither is printed.
+            .field("upstream_url", &"<redacted>")
+            .field("sui_rpc_url", &"<redacted>")
             .field("nft_type", &self.nft_type)
             .field("gate_id", &self.gate_id)
             .field("single_use", &self.single_use)
@@ -241,9 +243,16 @@ pub fn parse_rpc_auth_header(raw: Option<&str>) -> anyhow::Result<Option<AuthHea
     }
 }
 
-/// Require `https://` unless `allow_http` (localnet / in-cluster) permits `http://`.
+/// Require `https://` unless `allow_http` (localnet / in-cluster) permits `http://`, and refuse
+/// credentials in the URL (userinfo): they have their own redacted channels (`UPSTREAM_AUTH_HEADERS`,
+/// `SUI_RPC_AUTH_HEADER`), and the Workers gateway refuses them too.
 fn check_scheme(var: &str, url: &str, allow_http: bool) -> anyhow::Result<()> {
     if url.starts_with("https://") || (allow_http && url.starts_with("http://")) {
+        let after = url.find("://").map_or(0, |i| i + 3);
+        let authority = url[after..].split(['/', '?', '#']).next().unwrap_or("");
+        if authority.contains('@') {
+            anyhow::bail!("{var} must not carry credentials (use the auth header variables)");
+        }
         Ok(())
     } else if url.starts_with("http://") {
         anyhow::bail!("{var} must use https:// (set ALLOW_INSECURE_HTTP=1 for localnet or an in-cluster upstream)")
@@ -441,11 +450,16 @@ impl GatewayConfig {
         }
 
         let upstream_timeout_secs: u64 = parse_int(get, "UPSTREAM_TIMEOUT_SECS", 600, 1, 3600)?;
+        let body_read_timeout_secs: u64 = parse_int(get, "BODY_READ_TIMEOUT_SECS", 30, 1, 3600)?;
         let redemption_lease_ttl_secs: u64 =
             parse_int(get, "REDEMPTION_LEASE_TTL_SECS", 900, 30, 86_400)?;
-        if redemption_lease_ttl_secs <= upstream_timeout_secs {
+        // The lease is taken before the body is read and held until the upstream answers, so it
+        // must outlive both deadlines (audit F46), or a duplicate could lease the same consume
+        // while the first upload is still running.
+        if redemption_lease_ttl_secs <= upstream_timeout_secs.saturating_add(body_read_timeout_secs)
+        {
             anyhow::bail!(
-                "REDEMPTION_LEASE_TTL_SECS must exceed UPSTREAM_TIMEOUT_SECS (a lease must outlive its upload)"
+                "REDEMPTION_LEASE_TTL_SECS must exceed UPSTREAM_TIMEOUT_SECS + BODY_READ_TIMEOUT_SECS (a lease must outlive its whole request)"
             );
         }
         let redemption_retention_secs: u64 = parse_int(
@@ -510,7 +524,7 @@ impl GatewayConfig {
             allow_volatile_redemptions,
             rpc_timeout_secs: parse_int(get, "RPC_TIMEOUT_SECS", 15, 1, 120)?,
             header_read_timeout_secs: parse_int(get, "HEADER_READ_TIMEOUT_SECS", 10, 1, 300)?,
-            body_read_timeout_secs: parse_int(get, "BODY_READ_TIMEOUT_SECS", 30, 1, 3600)?,
+            body_read_timeout_secs,
             max_connections: parse_int(get, "MAX_CONNECTIONS", 1024, 1, 1_000_000)?,
             shutdown_grace_secs: parse_int(get, "SHUTDOWN_GRACE_SECS", 30, 1, 3600)?,
             max_concurrent_requests: parse_int(get, "MAX_CONCURRENT_REQUESTS", 64, 1, 100_000)?,
@@ -614,6 +628,21 @@ mod validation_tests {
     }
 
     #[test]
+    fn urls_must_not_carry_credentials() {
+        for bad in [
+            "https://user:pass@x.example",
+            "https://token@x.example/v1",
+            "http://u:p@127.0.0.1:9000",
+        ] {
+            let e = check_scheme("U", bad, true).unwrap_err().to_string();
+            assert!(e.contains("credentials"), "{bad}: {e}");
+            assert!(!e.contains("pass") && !e.contains("token@"), "{e}"); // the URL is not echoed
+        }
+        // An `@` in the path or query is not userinfo.
+        assert!(check_scheme("U", "https://x.example/a@b?c=d@e", false).is_ok());
+    }
+
+    #[test]
     fn debug_redacts_credentials() {
         let mut cfg = crate::tests_support::test_cfg();
         cfg.redis_url = Some("redis://:hunter2@redis:6379".into());
@@ -621,9 +650,16 @@ mod validation_tests {
             name: "CF-Access-Client-Secret".into(),
             value: "s3cret".into(),
         }];
+        cfg.upstream_url = "https://private-origin.internal.example".into();
+        cfg.sui_rpc_url = "https://rpc.example/KEY123".into();
         let out = format!("{cfg:?}");
         assert!(!out.contains("hunter2") && !out.contains("s3cret"), "{out}");
         assert!(out.contains("CF-Access-Client-Secret"));
+        // The private origin and an RPC key in the path are never printed (audit F26).
+        assert!(
+            !out.contains("private-origin") && !out.contains("KEY123"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -777,6 +813,20 @@ mod validation_tests {
             ("REDEMPTION_LEASE_TTL_SECS", "600")
         ])
         .contains("exceed UPSTREAM_TIMEOUT_SECS"));
+        // The body-read deadline counts too (audit F46): 600 + 400 = 1000 >= 900.
+        assert!(err(&[("BODY_READ_TIMEOUT_SECS", "400")]).contains("BODY_READ_TIMEOUT_SECS"));
+        assert!(err(&[
+            ("UPSTREAM_TIMEOUT_SECS", "500"),
+            ("BODY_READ_TIMEOUT_SECS", "400"),
+            ("REDEMPTION_LEASE_TTL_SECS", "900")
+        ])
+        .contains("BODY_READ_TIMEOUT_SECS"));
+        assert!(load(&[
+            ("UPSTREAM_TIMEOUT_SECS", "500"),
+            ("BODY_READ_TIMEOUT_SECS", "399"),
+            ("REDEMPTION_LEASE_TTL_SECS", "900")
+        ])
+        .is_ok());
         assert!(err(&[
             ("CONSUME_MAX_AGE_SECS", "864000"),
             ("REDEMPTION_RETENTION_SECS", "432000")

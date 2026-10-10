@@ -2,7 +2,7 @@
 
 All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
-## [Unreleased]
+## [0.0.22] - 2026-10-10
 
 ### Added
 

@@ -12,7 +12,7 @@ use blake2::{Blake2b, Digest};
 type Blake2b256 = Blake2b<U32>;
 
 // Sui signature-scheme flag bytes (first byte of a serialized signature).
-const FLAG_ED25519: u8 = 0x00;
+pub(crate) const FLAG_ED25519: u8 = 0x00;
 const FLAG_SECP256K1: u8 = 0x01;
 const FLAG_SECP256R1: u8 = 0x02;
 const FLAG_MULTISIG: u8 = 0x03;
@@ -43,7 +43,7 @@ fn write_uleb128(out: &mut Vec<u8>, mut v: u64) {
 
 /// blake2b256( intent(PersonalMessage,V0,Sui) || bcs(Vec<u8> message) ). This is exactly
 /// what a Sui wallet signs for a personal message.
-fn signing_digest(message: &[u8]) -> [u8; 32] {
+pub(crate) fn signing_digest(message: &[u8]) -> [u8; 32] {
     let mut data = vec![3u8, 0, 0]; // IntentScope::PersonalMessage, V0, AppId::Sui
     write_uleb128(&mut data, message.len() as u64);
     data.extend_from_slice(message);
@@ -52,7 +52,7 @@ fn signing_digest(message: &[u8]) -> [u8; 32] {
 
 /// Sui address for a scheme: blake2b256(flag || pubkey), hex, 0x-prefixed. `pubkey` is the
 /// 32-byte ed25519 key or the 33-byte SEC1-compressed secp256k1/r1 key.
-fn derive_address(flag: u8, pk: &[u8]) -> String {
+pub(crate) fn derive_address(flag: u8, pk: &[u8]) -> String {
     let mut d = Vec::with_capacity(1 + pk.len());
     d.push(flag);
     d.extend_from_slice(pk);
