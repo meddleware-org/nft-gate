@@ -141,11 +141,13 @@ against `main` (`367e673`).
    a pre-verification per-IP limit, a swept rate table, bounded caches, strict configuration.
 6. **Ownership mode** (F7): counts only usable passes.
 
-**What remains.** Nothing above Info/Low is unresolved in code. The two DEFERRED items are
-maintainer-owned: the **Cloudflare plan** and body/CPU sizing (F11, OQ3) and the **scheduled negative
-origin-lock check** (F32; a one-off direct request on 2026-10-09 was refused with 401). Five items are
-MITIGATED with a stated residual: deploy-environment reviewers and API-token scopes (F16, F31, OQ4),
-cosmetic stale comments (F21), the `unknown` IP bucket (F29) and test gaps (F30).
+**What remains.** Nothing above Info/Low is unresolved in code. The one DEFERRED item is
+maintainer-owned: the **Cloudflare plan** and body/CPU sizing (F11, OQ3). Three items are MITIGATED with
+a stated residual: deploy-environment reviewers and API-token scopes (F16, F31, OQ4) and the `unknown`
+IP bucket (F29). Fixed after the first re-verification (2026-10-10, unreleased, commit pending): the
+**scheduled negative origin-lock check** (F32: `origin-lock.yml`), the cosmetic stale comments (F21),
+the residual test gaps (F30) and the base64/UTF-8/JSON layers of proof decoding (F47,
+nft-gate-client 0.0.17).
 
 **Verified strengths.**
 
@@ -162,8 +164,9 @@ cosmetic stale comments (F21), the `unknown` IP bucket (F29) and test gaps (F30)
   uses OIDC with provenance.
 
 **Posture.** A hardened, live testnet gateway. The remaining mainnet work is operational: confirm the
-Cloudflare plan against the body cap and CPU budget (F11), schedule the negative origin check (F32),
-decide deploy reviewers and record token scopes (F16, F31), and obtain an external review.
+Cloudflare plan against the body cap and CPU budget (F11), decide deploy reviewers and record token
+scopes (F16, F31), and obtain an external review. The negative origin check is scheduled (F32); confirm
+its first run after the release.
 
 ---
 
@@ -191,7 +194,7 @@ platform (execution, `CF-Connecting-IP`, Durable Object consistency, Access).
 | --- | --- | --- |
 | Client | every header, body + framing, nonce/token strings, query | §A I9 (body), I14 (client identity), I12/I13 (state), I19 (cache); Sui client lens verification (I3–I5) |
 | Cloudflare platform | execution, limits, `CF-Connecting-IP`, cache, Access | trust anchor; plan limits (OQ3) |
-| Upstream origin | responses; reachability without the gateway | origin lock (I17 — refused directly on 2026-10-09; positive check in every deploy; scheduled negative check F32) |
+| Upstream origin | responses; reachability without the gateway | origin lock (I17 — refused directly on 2026-10-09; positive check in every deploy; daily negative check `origin-lock.yml`, F32) |
 | Sui RPC | chain reads | Sui client lens rows |
 | Holder of the deploy token | production code + secrets | B.CF-1 |
 | Readers of `wrangler.toml` | non-secret config | I16 — the config discloses only public values |
@@ -220,7 +223,7 @@ platform (execution, `CF-Connecting-IP`, Durable Object consistency, Access).
 
 | Party | Power | Consequence / bound |
 | --- | --- | --- |
-| This gateway in front of the relay | admits requests carrying an access proof | bypass if the relay is reachable without it. The relay origin is behind Cloudflare Access (`docs/networking/CLOUDFLARE.md` §2.4), `deploy-workers.yml` checks that the origin **accepts** the token (`scripts/check-upstream-auth.mjs`, repository variable `UPSTREAM_CHECK_URL` set), and a direct request was refused with 401 on 2026-10-09. A scheduled negative check does not exist yet (F32 / OQ10). |
+| This gateway in front of the relay | admits requests carrying an access proof | bypass if the relay is reachable without it. The relay origin is behind Cloudflare Access (`docs/networking/CLOUDFLARE.md` §2.4), `deploy-workers.yml` checks that the origin **accepts** the token (`scripts/check-upstream-auth.mjs`, repository variable `UPSTREAM_CHECK_URL` set), and a direct request was refused with 401 on 2026-10-09. A daily negative check (`origin-lock.yml`, F32) requires Access to refuse direct requests with and without an unknown token. |
 | User wallet | pays and signs the consume | the consume digest is the redemption token (F2, F3); the signed message is bound to this gateway (F1) |
 
 ### Supply chain & input matrix (TS lens)
@@ -230,7 +233,7 @@ platform (execution, `CF-Connecting-IP`, Durable Object consistency, Access).
 | Dependency authors | install/build/runtime code | lockfile; `npm audit --audit-level=high` in CI and publish; Dependabot weekly groups; `allowScripts` (esbuild, workerd) |
 | npm registry | tarballs | lockfile integrity; OIDC provenance on publish |
 | CI runner | build, deploy, publish credentials | base §B.2 |
-| Untrusted inputs: proof token, headers, RPC responses, upstream responses | shapes/sizes | `decodeAccessProof` (4096 B cap, ASCII, strict grammar; nft-gate-client); typed gRPC client; strict gate/event decoding; streamed body counter |
+| Untrusted inputs: proof token, headers, RPC responses, upstream responses | shapes/sizes | `decodeAccessProof` (4096 B cap, ASCII, strict grammar, canonical base64, strict UTF-8, bounded JSON; nft-gate-client 0.0.17); typed gRPC client; strict gate/event decoding; streamed body counter |
 | Embedding host | n/a — a Worker, not a library | — |
 
 ### Identity & credential matrix (AUTH lens)
@@ -260,14 +263,14 @@ cite the first-pass locations; the evidence paragraphs give the current ones.
   - `index.ts`, `verify.ts`, `chain.ts`, `proxy.ts`, `headers.ts`, `redemption.ts`, `cors.ts`,
     `config.ts`, `crypto.ts`, `quota.ts`, `wire.ts`
   - `state/{types,durable_object,kv,select}.ts`
-- `gateway-workers/test/**`, `scripts/check-upstream-auth.mjs`, `wrangler.toml`, `package.json`,
+- `gateway-workers/test/**`, `scripts/check-upstream-auth.mjs`, `scripts/check-origin-locked.mjs`, `wrangler.toml`, `package.json`,
   `package-lock.json`, `tsconfig.json`, `vitest.config.ts`, `eslint.config.ts`, `README.md`,
   `CLAUDE.md`, `CHANGELOG.md`
 - Repo-level: `conformance/vectors.json`, `scripts/sync-vectors.mjs` (replaced `gen-vectors.mjs`),
   `SECURITY.md`, `scripts/check-versions.sh`, `.github/dependabot.yml`,
-  `.github/workflows/{node-ci,npm-publish,deploy-workers}.yml`
+  `.github/workflows/{node-ci,npm-publish,deploy-workers,origin-lock}.yml`
 - Dependencies read at the installed version: `@meddleware/access-gate-client` 0.0.6
-  (`ownsAccessNft`, usable passes only) and `@meddleware/nft-gate-client` 0.0.16 (protocol v2, vectors,
+  (`ownsAccessNft`, usable passes only) and `@meddleware/nft-gate-client` 0.0.17 (protocol v2, strict proof decoding, vectors,
   gateway response contract)
 - Cross-repo evidence (read-only):
   - `access-gate-sui/Published.toml` and `CLAUDE.md`
@@ -282,7 +285,7 @@ cite the first-pass locations; the evidence paragraphs give the current ones.
 - The Cloudflare dashboard configuration (Access application and policy, WAF, plan). Recorded as OQs
   where the lens needs them.
 
-**Environment / commands (2026-10-09, node_modules as installed — wrangler 4.143.0 and eslint 10.11.0,
+**Environment / commands (2026-10-09; the 2026-10-10 re-run is in the log; node_modules as installed — wrangler 4.143.0 and eslint 10.11.0,
 one Dependabot bump behind the lockfile's 4.147.0 / 10.12.0; `npm ci` was not re-run):**
 
 | Command | Result |
@@ -384,11 +387,10 @@ can trigger it without an operator noticing.
   implements `RedemptionStore`.
 - The `kv.ts` module doc now says redemptions are not stored in KV; `SECURITY.md` invariant 4 and the
   `CLAUDE.md` Redemption section state the DO-only rule.
-- Tests: `test/config.test.ts` "refuses the KV backend, whose lease cannot be atomic". There is no
-  direct test of the degrade-flag branch (it lives in module state of `index.ts`); it is covered by the
-  config refusal and by construction (F30).
-- Residual: one sentence in `CLAUDE.md` ("Fallback: Workers KV") still says the single-use bind is
-  "unaffected" (F21).
+- Tests: `test/config.test.ts` "refuses the KV backend, whose lease cannot be atomic"; since 2026-10-10
+  `test/gateway-state.test.ts` pins the degrade-flag branch (moves ownership-mode nonces to KV, ignored
+  in single-use mode; F30).
+- The `CLAUDE.md` sentence that called the single-use bind "unaffected" was corrected 2026-10-10 (F21).
 
 ### F3 — Redemption lease is not owner-bound and can lapse during a slow upload
 
@@ -487,7 +489,7 @@ per-object storage limit, and slower writes over time.
 - `rateCheck` sweeps `DELETE FROM rate WHERE start < now - 60000` on about 2% of calls, so the table is
   bounded by the keys seen in the last minute. Test: `test/state.test.ts` "rate windows older than a
   minute are swept (the table is bounded by recent keys)".
-- `clientIp` (`src/index.ts`) keys IPv6 clients by their /64. This keying has no direct test (F30).
+- `clientIp` (`src/index.ts`) keys IPv6 clients by their /64; pinned by `gateway-state.test.ts` since 2026-10-10 (F30).
 
 ### F6 — No timeout on the upstream `fetch` or on gRPC calls
 
@@ -839,8 +841,8 @@ and releases the lease", "a holder whose lease lapsed before commit is told 502�
 
 ### F21 — Stale and misleading comments, and dead code
 
-**Severity:** Info   **Disposition:** MITIGATED (the binding-model statements were corrected; five cosmetic
-items remain, listed below, for the next patch release)
+**Severity:** Info   **Disposition:** RESOLVED (binding-model statements 0.0.19; the remaining cosmetic items
+2026-10-10, unreleased, commit pending)
 **Where:**
 
 - `src/chain.ts:9-12` (module doc: "bound to the challenge nonce + sender + gate") contradicts
@@ -862,8 +864,11 @@ model in exactly the area where F1/F23 matter.
   nonce"); `nonceMatches` (`chain.ts:320`) is exported, unused and no longer tested; `cors.ts:4-5`;
   `wrangler.toml:3`; the `proxy.ts` `@ts-expect-error` comment; and `CLAUDE.md`'s "Fallback: Workers KV"
   bullet that calls the single-use bind "unaffected" (contradicts F2's fix).
-- Recommended: correct each comment and delete `nonceMatches`, in the next patch release (patch-only
-  bumps until go-live).
+- 2026-10-10 (unreleased, commit pending): the `chain.ts` module doc now says the event is not
+  nonce-bound (F23); `nonceMatches` and its import are deleted (no caller, no test); `cors.ts` no longer
+  names `sui.meddleware.co.uk`; `wrangler.toml` points at `../gateway-rust`; the `proxy.ts`
+  `@ts-expect-error` note says what is missing from the type; `CLAUDE.md`'s KV bullet now says
+  `SINGLE_USE=true` refuses the KV backend. `tsc` and `eslint` clean (an unused import would fail lint).
 
 ### F22 — Consume binding uses the event `sender`, not the `consumer` field
 
@@ -1001,7 +1006,8 @@ falls back to `'unknown'`).
 
 ### F30 — Coverage gaps against the WORKERS and TS lens requirements
 
-**Severity:** Info   **Disposition:** MITIGATED (most gaps closed in 0.0.19; four residual tests below)
+**Severity:** Info   **Disposition:** RESOLVED (most gaps closed in 0.0.19; the residual tests 2026-10-10,
+unreleased, commit pending)
 **Where:** `test/**`.
 
 **Issue:** The following required tests are missing:
@@ -1032,6 +1038,13 @@ No coverage tool or figure is configured.
   cached**; a router-level test that a store outage is `503` (only the unit-level propagation is
   tested); a test of the IPv6 /64 keying and of the degrade-flag branch (F2). No coverage tool is
   configured (`@vitest/coverage-v8` on the Node pool remains a suggestion).
+- 2026-10-10 (unreleased, commit pending), all in the workerd project, `test/gateway-state.test.ts`:
+  public-path rate limit (120 pass, the 121st is 429 with CORS, another IP unaffected); IPv6 `clientIp`
+  cases and a 30-request rotation inside one /64 that is then limited while a neighbouring /64 is not;
+  `forward()` of a gated request neither calls `cache.match` nor `cache.put`; a throwing Durable Object
+  binding answers JSON 503 `gateway state unavailable` with CORS; the degrade flag moves ownership-mode
+  nonces to KV and is ignored in single-use mode. The file notes why its tests are ordered (a fresh
+  module copy invalidates the Durable Object host). The coverage tool stays a suggestion.
 
 ### F31 — Credential inventory, Access token expiry and API-token scopes are unrecorded
 
@@ -1065,8 +1078,8 @@ No coverage tool or figure is configured.
 
 ### F32 — Origin lock is verified positively, not negatively
 
-**Severity:** Low   **Disposition:** DEFERRED (pending OQ10; the pre-mainnet gate "the negative origin
-check runs on a schedule", PROXY lens)
+**Severity:** Low   **Disposition:** RESOLVED (2026-10-10, unreleased, commit pending; first GitHub run
+to be confirmed after the push)
 **Where:** `scripts/check-upstream-auth.mjs` (asserts the origin **accepts** the token, with
 `redirect: 'manual'`), `deploy-workers.yml` (`UPSTREAM_CHECK_URL`), `README.md:96-125`.
 
@@ -1082,10 +1095,21 @@ this gateway is moot, and nothing would notice.
   `walrus-relay-origin.meddleware.co.uk` (`/` and `/v1/tip-config`) was refused with **401** on
   2026-10-09; the positive check runs on every deploy (`UPSTREAM_CHECK_URL` is set as a repository
   variable; the deploys of 2026-10-09 succeeded). This is a one-off manual check, not a repeatable one.
-- Not done: extend `check-upstream-auth.mjs` to also request `UPSTREAM_CHECK_URL` **without** the
-  headers and require 302-to-Access or 401/403, and run it in the deploy job and on a schedule
-  (read-only, no secrets beyond the existing one). Needs a code change in a later patch and the
-  repository variable; track with OQ10.
+- Done 2026-10-10: `.github/workflows/origin-lock.yml` runs daily (05:17 UTC), on demand and on pull
+  requests that touch it. It runs `scripts/check-origin-locked.mjs` with the repository **variable**
+  `UPSTREAM_CHECK_URL` (a public URL, already set; no secret, no credential sent). Three GET probes with
+  `redirect: 'manual'`: the check path and `/` without a token, and the check path with a made-up
+  service token. Each must be refused **by Access** (`scripts/origin-lock.ts`: 401/403 carrying
+  `cf-access-domain`, or a redirect to `*.cloudflareaccess.com` / `/cdn-cgi/access/`). A 2xx, a refusal
+  by anything else, a 5xx or three failed attempts fails the run; a zone challenge (`cf-mitigated:
+  challenge`, Bot Fight Mode) is inconclusive and only warns, as in the deploy check. A missing
+  variable also fails, so the schedule cannot silently stop checking.
+- Pinned by `test/origin-lock.test.ts` (verdict table; the script fails closed without a URL or on
+  non-https). Run locally against the live origin 2026-10-10: three probes, all `401` with
+  `cf-access-domain`, exit 0; against `https://example.com/` the script exits 1.
+- Not changed: `check-upstream-auth.mjs` stays the positive deploy check (it needs the secret); the
+  negative check is kept out of the deploy job so a lock problem cannot block a code fix. GitHub
+  pauses scheduled workflows after 60 days without repository activity (noted in the workflow).
 
 ### F33 — `@mysten/sui` uses a tilde range one minor behind; TS shared-dependency matrix row
 
@@ -1102,7 +1126,7 @@ this gateway is moot, and nothing would notice.
 
 **Remediation / evidence:** `@mysten/sui` is `^2.33.1` (0.0.18 CHANGELOG), the ADR-0001 baseline
 (`^2.33.1`, one copy per bundle); the lockfile resolves 2.35.0 and `npm ls @mysten/sui` shows a single
-deduped copy shared with access-gate-client. First-party ranges are `^0.0.6` and `^0.0.16`, the latest
+deduped copy shared with access-gate-client. First-party ranges are `^0.0.6` and `^0.0.16` (`^0.0.17` since 2026-10-10, F47), the latest
 published. The `@noble/*` `~2.4.0` pins stay (same family as `@mysten/sui`, on the verification path).
 
 ### F34 — KV backend has a documented cross-region nonce replay window (ownership mode)
@@ -1307,6 +1331,31 @@ created for mainnet should set `pause_blocks_access` deliberately.
   and cookies never reach the client or the edge cache, and methods and paths are allowlisted.
 - Configuration is strict: a typo is a startup error, not a weaker mode.
 
+### F47 — Proof-token base64, UTF-8 and JSON layers were lenient in the client decoder (parity with `gateway-rust`)
+
+**Severity:** Low   **Disposition:** RESOLVED (nft-gate-client 0.0.17 adopted 2026-10-10, unreleased, commit
+pending). Not the same finding as `gateway-rust` F47. Origin: nft-gate-client audit F24.
+**Where:** `decodeAccessProof` in `@meddleware/nft-gate-client` (imported by `src/wire.ts`), through
+`atob` / `TextDecoder` / `JSON.parse`.
+
+**Issue:** Up to 0.0.16 the shared decoder checked size, ASCII and the field grammar but let `atob`
+forgive unpadded, whitespace-split and non-canonical base64, accept a UTF-8 BOM and invalid UTF-8 in
+unknown keys, and parse unpaired surrogate escapes, overflowing numbers and deep nesting. The Rust
+gateway (`BASE64_STANDARD.decode`, `serde_json`) already refused these, so the two gateways could decide
+differently on a crafted token. No signature check is bypassed (the fields are validated afterwards),
+so this is a parity and robustness gap, not an admission bug.
+
+**Remediation / evidence:** `@meddleware/nft-gate-client` ^0.0.17 decodes strictly (canonical padded
+standard-alphabet base64, fatal UTF-8 without BOM, bounded JSON) and adds 11 vectors to
+`proofDecodeRejects`. Here: dependency bumped (lockfile entry only; the `overrides` for `sharp` and
+`undici` are kept), `conformance/vectors.json` refreshed with `node ../scripts/sync-vectors.mjs`
+(`--check` passes). `test/conformance.test.ts` (Node) runs every reject case through `decodeAccessProof`;
+`test/router.test.ts` (workerd, where `atob`/`TextDecoder` are the runtime's own) runs the same cases
+through the decoder and, except the newline case that cannot ride in a header, through
+`POST /v1/blob-upload` expecting `403 malformed access proof`. All 27 reject cases pass in both runtimes.
+`gateway-rust` already rejected these cases (its `conformance_shared_vectors` reads the same list); the
+second gateway's re-run belongs to its own audit.
+
 ---
 
 ## Section A — Invariant verification matrix
@@ -1326,12 +1375,12 @@ created for mainnet should set `pause_blocks_access` deliberately.
 | I11 | Upstream credentials go only to the upstream origin; redirects never followed | `proxy.ts` (`redirect: 'manual'`, 3xx → 502) | proxy "never follows a redirect…" | HOLDS (F4) |
 | I12 | Replay/single-use state strongly consistent; shard names allowlisted | `state/types.ts::shardOfNonce`; DO backend; config refuses KV for single-use | "the Durable Object backend rejects a forged shard tag"; "a region-sharded nonce is accepted by the shard that issued it"; config "refuses the KV backend…" | HOLDS (KV only in ownership mode, F34) |
 | I13 | Lease/commit/release fail closed; commit failure has a shared defined outcome | `redemption.ts` | "reports a failed commit as 502…", "releases and rethrows…", "a holder whose lease lapsed before commit is told 502…" | HOLDS (see F20) |
-| I14 | Abuse keys from `CF-Connecting-IP` (IPv6 by /64); every state-allocating public endpoint limited; gated limited before verification | `index.ts::clientIp`, challenge + public + `pre:` `rateCheck` | router "rate-limits GET /v1/challenge per client IP", "rate-limits gated requests per client IP BEFORE verifying the proof" | HOLDS (public-path limit and /64 keying untested — F30) |
+| I14 | Abuse keys from `CF-Connecting-IP` (IPv6 by /64); every state-allocating public endpoint limited; gated limited before verification | `index.ts::clientIp`, challenge + public + `pre:` `rateCheck` | router "rate-limits GET /v1/challenge per client IP", "rate-limits gated requests per client IP BEFORE verifying the proof"; gateway-state "rate-limits public paths…", "keys IPv6 clients by their /64" | HOLDS (F30) |
 | I15 | Inbound `Authorization`/`X-Access-Proof`/`cf-access-*` stripped; injected headers override | `headers.ts::upstreamRequestHeaders` | proxy "strips hop-by-hop … request fields" | HOLDS |
 | I16 | Committed config holds only public values; secrets inventoried | `wrangler.toml` | review | HOLDS |
-| I17 | Upstream reachable only via the gateway (origin lock) | Cloudflare Access (external) | `check-upstream-auth.mjs` (positive, every deploy); direct request refused 401 on 2026-10-09 (manual) | HOLDS (code-only) — scheduled negative check missing, F32 |
+| I17 | Upstream reachable only via the gateway (origin lock) | Cloudflare Access (external) | `check-upstream-auth.mjs` (positive, every deploy); `check-origin-locked.mjs` (negative, daily, `origin-lock.yml`); direct request refused 401 on 2026-10-09 and 2026-10-10 | HOLDS (code-only: Access itself is external; F32) |
 | I18 | CORS: exact allowlist, `Vary: Origin`, preflight before config/auth, on errors; upstream CORS never survives | `cors.ts`, `headers.ts`, `index.ts` | router CORS tests, "upstream-supplied CORS never widens the allowlist" | HOLDS (F12) |
-| I19 | Only public paths cached, under a normalised key, without upstream CORS/cookies; gated never cached | `index.ts::forwardPublic` | router "drops the query string from the cache key…" | HOLDS (gated non-caching by construction; untested — F30) |
+| I19 | Only public paths cached, under a normalised key, without upstream CORS/cookies; gated never cached | `index.ts::forwardPublic` | router "drops the query string from the cache key…"; gateway-state "forwarding a gated request neither reads nor writes the edge cache" | HOLDS (F30) |
 | I20 | No proofs, signatures or secrets in logs or error bodies | `index.ts` (misconfig detail to log only), `deny` bodies | review | HOLDS (code-only) |
 | I21 | Hop-by-hop (and `Connection`-named) fields stripped both directions; cookies and CORS stripped from responses (`SECURITY.md` inv. 6) | `headers.ts` | proxy header-policy tests | HOLDS (F13) |
 | I22 | Misconfiguration fails closed | `config.ts::loadConfig` → 500 | config tests | HOLDS (F8, F17) |
@@ -1356,7 +1405,7 @@ merged the Worker group on 2026-10-09 (`dd9b146`).
 | --- | --- | --- | --- | --- |
 | `@mysten/sui` | `^2.33.1` (2.35.0) | every gated request (gRPC) | clean | ADR-0001 baseline `^2.33.1`; single copy |
 | `@noble/curves` / `@noble/hashes` | `~2.4.0` (2.4.0) | signature verify path | clean | `zip215`, `lowS` options |
-| `@meddleware/nft-gate-client` | `^0.0.16` (0.0.16) | wire format, vectors | clean | first-party; exact resolution |
+| `@meddleware/nft-gate-client` | `^0.0.17` (0.0.17) | wire format, vectors | clean | first-party; exact resolution |
 | `@meddleware/access-gate-client` | `^0.0.6` (0.0.6) | ownership mode | clean | usable passes only (F7) |
 | wrangler / workerd | `^4.143.0` (4.147.0 / 1.20260815.1) | deploy, test pool | clean | |
 | `@cloudflare/vitest-pool-workers` | `~0.22.0` (0.22.0) | CI tests | clean | |
@@ -1447,7 +1496,7 @@ Rust column from `gateway-rust` 0.0.21 (its own audit is canonical for it; rows 
 | Behaviour | `gateway-workers` | `gateway-rust` | Shared vector / test |
 | --- | --- | --- | --- |
 | Personal message bytes (v2) | via nft-gate-client | `proof.rs` | `personalMessage` + rejects + `audienceMismatch` ✓ |
-| Proof decode (4096 B cap, ASCII, strict grammar, camelCase `consumeDigest`) | nft-gate-client `decodeAccessProof` | `proof.rs` | `proofDecode` + rejects ✓ |
+| Proof decode (4096 B cap, ASCII, strict grammar, camelCase `consumeDigest`) | nft-gate-client `decodeAccessProof` | `proof.rs` | `proofDecode` + 27 rejects (base64/UTF-8/JSON layers included, F47) ✓ |
 | ed25519 (ZIP-215) | noble `zip215: true` | `ed25519-consensus` | `zip215` + non-canonical-s negative ✓ |
 | secp256k1 / r1 low-S | noble `lowS: true` | `normalize_s()` reject | high-S negatives ✓ |
 | Flags 0x03 / 0x05 / 0x06 | fail closed | fail closed | negatives ✓ |
@@ -1532,7 +1581,7 @@ Rust column from `gateway-rust` 0.0.21 (its own audit is canonical for it; rows 
 
 | Protocol | Version | Deviations | Pinning test |
 | --- | --- | --- | --- |
-| nft-gate access proof v2 (`nft-gate:access:v2`) | nft-gate-client 0.0.16; root `CLAUDE.md`; `SECURITY.md` inv. 5 | none; v1 refused (no fallback) | `conformance.test.ts`, `verify.test.ts` "audience binding (protocol v2)" |
+| nft-gate access proof v2 (`nft-gate:access:v2`) | nft-gate-client 0.0.17; root `CLAUDE.md`; `SECURITY.md` inv. 5 | none; v1 refused (no fallback) | `conformance.test.ts`, `verify.test.ts` "audience binding (protocol v2)" |
 | HTTP bearer | RFC 6750 / RFC 9110 §11 | none (case-insensitive, any whitespace) | none |
 | Cloudflare Access service tokens | `CF-Access-Client-Id` / `CF-Access-Client-Secret` headers | never sent on redirects (redirects not followed, F4); client `cf-access-*` fields stripped | `proxy.test.ts`; `check-upstream-auth.mjs` (shape + positive check) |
 
@@ -1542,11 +1591,11 @@ Rust column from `gateway-rust` 0.0.21 (its own audit is canonical for it; rows 
 
 ### C.1 Coverage grade
 
-`npx vitest run` gives **179 tests: 176 passed, 3 skipped** (2026-10-09; first pass 112/109/3).
+`npx vitest run` gives **230 tests: 227 passed, 3 skipped** (2026-10-10; 179/176/3 on 2026-10-09; first pass 112/109/3).
 
-- `unit` project (Node): verify, conformance, redemption, config, chain.
+- `unit` project (Node): verify, conformance, redemption, config, chain, origin-lock.
 - `cloudflare-integration` project (workerd via `@cloudflare/vitest-pool-workers`): router, state,
-  proxy.
+  proxy, gateway-state.
 - 1 file skipped: `test/integration/grpc-chain.integration.test.ts`, env-gated `GRPC_TESTNET=1`
   (`npm run test:grpc`); its 3 tests passed against the public testnet fullnode on 2026-10-09.
 
@@ -1555,9 +1604,9 @@ Both pools run in CI (`test:all`). No coverage tool is configured (F30).
 | Dimension | Assessment |
 | --- | --- |
 | Happy-path coverage | covered: each scheme, owner allow, single-use allow + redemption key, challenge round trip, public cache, under-limit bodies |
-| Error-path coverage | covered: malformed proof, bad signature, replay, expired/unknown nonce, non-owner, paused gate, gate read failure and unrecognised JSON → chain error, failed transaction, upstream unreachable / stalled (502/504), redirect, commit failure → 502, lost lease → 502, release on throw, KV + single-use rejection, store error propagation. **Missing:** router-level 503 for a store outage (F30) |
-| Boundary coverage | covered: CL at/over cap, chunked over cap, hard nonce cap, rate limit 0 disables, consume age window, lease/deadline and retention/age config bounds, config integer bounds, malformed digest. **Missing:** IPv6 /64 keying |
-| Security-relevant coverage | strong: shared vectors with negatives (per bound audience field) + ZIP-215, look-alike package, forged shard tag, query-string cache-busting, CORS denial and upstream ACAO, stale-holder lease, header policy. **Missing:** public-path rate limit, gated non-caching (F30) |
+| Error-path coverage | covered: malformed proof, bad signature, replay, expired/unknown nonce, non-owner, paused gate, gate read failure and unrecognised JSON → chain error, failed transaction, upstream unreachable / stalled (502/504), redirect, commit failure → 502, lost lease → 502, release on throw, KV + single-use rejection, store error propagation. router-level 503 for a store outage (`gateway-state.test.ts`), proof-decode rejects in workerd |
+| Boundary coverage | covered: CL at/over cap, chunked over cap, hard nonce cap, rate limit 0 disables, consume age window, lease/deadline and retention/age config bounds, config integer bounds, malformed digest, IPv6 /64 keying |
+| Security-relevant coverage | strong: shared vectors with negatives (per bound audience field) + ZIP-215, look-alike package, forged shard tag, query-string cache-busting, CORS denial and upstream ACAO, stale-holder lease, header policy, public-path rate limit, gated non-caching (F30), the 27 shared proof-decode rejects in both runtimes (F47) |
 
 WORKERS lens §C:
 
@@ -1568,9 +1617,9 @@ WORKERS lens §C:
 | Lease expiry and commit failure | yes (expiry at lease time, stale holder, lapsed lease at commit; the startup check makes expiry inside a forward impossible) |
 | Body limit for CL and chunked | yes |
 | CORS denial | yes |
-| Cache bypass for gated paths | **no** (F30) |
+| Cache bypass for gated paths | yes (`forward()` never touches the Cache API; F30) |
 | Query-string cache-busting | yes |
-| Rate limits on public and challenge endpoints | challenge yes; public **no** (F30) |
+| Rate limits on public and challenge endpoints | yes (F30) |
 
 PROXY lens §C:
 
@@ -1580,7 +1629,7 @@ PROXY lens §C:
 | Redirect to a foreign origin is refused and no credential reaches it | yes |
 | Unlisted method, unsafe path, public path with `POST` refused | yes |
 | Oversize declared, oversize chunked, stalled upstream release state | declared and chunked yes; stalled upstream ends in 504 and `redeemAndForward` releases on a non-2xx; a stalled **client** body is the edge's timeout (live-only) |
-| Lease expiry during a forward; stale holder; store error is 503 | stale holder yes; expiry during a forward is excluded by the startup check; store error 503 at unit level only |
+| Lease expiry during a forward; stale holder; store error is 503 | stale holder yes; expiry during a forward is excluded by the startup check; store error 503 at router level (`gateway-state.test.ts`) |
 | Shared vectors pass in every implementation | yes |
 
 ### C.2 Hermetic vs. live paths
@@ -1589,7 +1638,7 @@ PROXY lens §C:
 | --- | --- | --- | --- |
 | gRPC field shapes against a real fullnode | fakes only | `grpc-chain.integration.test.ts` (`GRPC_TESTNET=1`) | passed manually 2026-10-09; add a scheduled CI job (S3) |
 | Paywall end to end (buy, consume, v2 proof, upload through the Worker) | no | live testnet run by the maintainer | PASS 2026-10-09 |
-| Access enforcement at the origin (direct request refused) | n/a | live only | refused 401 on 2026-10-09; scheduled check F32 / OQ10 |
+| Access enforcement at the origin (direct request refused) | n/a | live only | refused 401 on 2026-10-09 and 2026-10-10; daily `origin-lock.yml` (F32) |
 | Plan limits (413 at the platform, CPU 1102, subrequests) | n/a | live only | F11 / OQ3 |
 | Client header-read, body-read and idle timeouts | n/a | live only (Cloudflare edge) | — |
 | Cross-colo cache behaviour, DO cross-region latency | n/a | live only | F25 |
@@ -1601,7 +1650,7 @@ PROXY lens §C:
 
 ### pre-localnet
 
-- [x] builds; type-check + lint + both test pools green (176 passed, 3 env-gated skipped) — this pass
+- [x] builds; type-check + lint + both test pools green (227 passed, 3 env-gated skipped) — 2026-10-10
 - [x] body cap enforced on streamed bytes and on Content-Length, with tests for both — F37
 - [x] no secrets in committed config; secret inventory written (names in `wrangler.toml`) — I16
 - [x] dependencies install clean (`npm ci`); `npm audit` high clean — B.1
@@ -1615,7 +1664,7 @@ PROXY lens §C:
 ### pre-testnet *(the deployment already runs on testnet)*
 
 - [x] origin lock verified (a direct request to the origin is refused) — refused 401 on 2026-10-09;
-  positive check in every deploy; the scheduled negative check is the pre-mainnet item below (F32)
+  positive check in every deploy; the daily negative check (`origin-lock.yml`) is ticked below (F32)
 - [x] workerd tests run in CI; replay and lease tests green — F41, F38, F3
 - [x] challenge / nonce issuer rate-limited; shard names allowlisted — F38, F40
 - [x] gated pre-auth rate limit — F9
@@ -1655,8 +1704,9 @@ PROXY lens §C:
   (nft-gate-client `isAscii`).
 - [x] no `any`/`as`/`!` at trust boundaries without justification — gRPC JSON is cast to
   `Record<string, Json>` and then field-checked; `@ts-expect-error` on `duplex` (comment stale, F21)
-- [ ] the negative origin check runs on a schedule — F32 / OQ10 (a code change in
-  `check-upstream-auth.mjs` plus the repository variable)
+- [x] the negative origin check runs on a schedule — F32 / OQ10 (`origin-lock.yml`, daily; the
+  repository variable `UPSTREAM_CHECK_URL` already exists; run locally against the live origin
+  2026-10-10, first GitHub run to confirm after the release; commit pending)
 - [ ] mainnet `access_gate` published and `NFT_TYPE`/`GATE_ID`/`NETWORK`/`GATEWAY_ORIGIN` populated from
   the canonical record — not yet (mainnet publication is a maintainer step, `OPERATOR_TASKS.md`
   "Mainnet release custody")
@@ -1684,7 +1734,7 @@ PROXY lens §C:
   off-chain in the redemption DO by design (F23), now owner-bound and age-bounded. Commission and
   payment stay on-chain.
 - **Deployment readiness:** Section D. It runs live on testnet; the open items are maintainer-owned
-  (F11, F16, F31, F32).
+  (F11, F16, F31).
 - **Chain-access layering & on-chain ID/ABI coupling:**
   - It conforms to ADR-0001: ownership parsing comes from `@meddleware/access-gate-client` and the
     wire format from `@meddleware/nft-gate-client`.
@@ -1708,8 +1758,8 @@ PROXY lens §C:
 3. MUST make leases owner-bound and longer than the maximum request (with an upstream deadline) —
    **holds** (F3, F6).
 4. MUST prove the origin refuses requests without the service token, and track the token's expiry —
-   **partly holds**: refused on 2026-10-09 and expiry recorded (2027-09-09), but the negative check is
-   not scheduled (F32, F31).
+   **holds**: refused on 2026-10-09 and 2026-10-10, checked daily by `origin-lock.yml` (F32), and expiry
+   recorded (2027-09-09, F31; no reminder yet).
 5. MUST rate-limit gated requests per `CF-Connecting-IP` before verification — **holds** (F9).
 6. MUST strip upstream `access-control-*` headers (including in the edge cache) and the full
    hop-by-hop set, consistent with `SECURITY.md` — **holds** (F12, F13).
@@ -1724,7 +1774,7 @@ PROXY lens §C:
 10. MUST reject exhausted passes in ownership mode or restrict the mode — **holds** (F7).
 11. MUST confirm the plan tier against the body cap and CPU, and record deploy protection and token
     scopes — **does not hold yet** (F11, F16, F31 / OQ3, OQ4; maintainer items).
-12. MUST schedule the negative origin check — **does not hold yet** (F32 / OQ10).
+12. MUST schedule the negative origin check — **holds** (F32; confirm the first scheduled run).
 
 **Lens baseline MUST lists.**
 
@@ -1733,7 +1783,7 @@ WORKERS lens:
 | ID | Holds? | Evidence |
 | --- | --- | --- |
 | CF-M1 | holds | I16 |
-| CF-M2 | partly (origin refused 2026-10-09 and expiry tracked; negative check not scheduled) | F32, F31 |
+| CF-M2 | holds (origin refused 2026-10-09 and 2026-10-10, negative check scheduled daily; expiry tracked) | F32, F31 |
 | CF-M3 | holds (DO only for single-use) | F2 |
 | CF-M4 | holds on streamed bytes; plan limit unconfirmed | F11 |
 | CF-M5 | holds (challenge, public, gated pre-auth) | F9 |
@@ -1800,7 +1850,7 @@ PROXY lens:
 | PX-M5 | partly (body cap, upstream total deadline, RPC deadline; client-side header/idle timeouts and connection caps are the Cloudflare edge's) | F6, B.PX-2 |
 | PX-M6 | holds for network, timeout, redirect and store failures; relay error statuses pass through by decision | F44 |
 | PX-M7 | holds | F3 |
-| PX-M8 | partly (lock exists and was refused 2026-10-09; negative check not scheduled) | F32 |
+| PX-M8 | holds (lock refused directly, checked daily) | F32 |
 | PX-M9 | holds | F8 |
 
 ## Implementation suggestions (SHOULD / MAY)
@@ -1820,9 +1870,8 @@ PROXY lens:
 - **S7** SHOULD import `GATEWAY_CONFLICT_CODES` / `GATEWAY_STATUS` from nft-gate-client in the Worker
   and assert the emitted codes against them, so the 409 vocabulary cannot drift from what walrus-client
   parses (B.WAL-1).
-- **S8** SHOULD extend `scripts/check-upstream-auth.mjs` with the negative request and run it on a
-  schedule (F32), and add the missing tests of F30 (public-path rate limit, gated non-caching,
-  router-level 503, IPv6 /64).
+- **S8** *(done 2026-10-10)* the negative origin check runs on a schedule (F32, `origin-lock.yml`) and
+  the missing tests of F30 exist (public-path rate limit, gated non-caching, router-level 503, IPv6 /64).
 - **S9** MAY add a `Via`/marker loop check (F43) if the package is offered white-label.
 
 ## Open questions
@@ -1852,7 +1901,8 @@ PROXY lens:
   with Meddleware's origins only in `wrangler.toml`? *(Decided 2026-10-08: yes; see F18.)*
 - **OQ10** Where is the relay's Cloudflare Access application recorded (application / policy / token
   IDs, expiry), and who reviews it? Should the negative origin check (F32) run on a schedule?
-  *(Recorded in `docs/networking/CLOUDFLARE.md` §2.4; scheduling the check is open.)*
+  *(Recorded in `docs/networking/CLOUDFLARE.md` §2.4. Decided 2026-10-10: yes, daily, as a separate
+  secret-free workflow — `origin-lock.yml`, F32.)*
 
 ## Risks
 
@@ -1867,8 +1917,10 @@ PROXY lens:
   redemptions, which fails closed.
 - **Supply chain.** wrangler/workerd and transitive dev tooling (pinned via `overrides`) are large.
   Advisories can land between audits; the CI audit gate and Dependabot are the controls.
-- **Origin lock is external configuration.** A dashboard change to Access can silently remove the
-  gate until F32's scheduled check exists.
+- **Origin lock is external configuration.** A dashboard change to Access can remove the gate; F32's
+  daily check (`origin-lock.yml`) notices within a day, but only if its schedule is alive (GitHub pauses
+  scheduled workflows after 60 days without repository activity) and the zone does not challenge the
+  runner (a challenge only warns).
 - **Access token expiry (2027-09-09)** stops every paid upload until rotated; there is no reminder yet
   (F31).
 - **No on-chain kill switch on the live relay gate** (F45): emergency stop is the route or the Access
@@ -1917,8 +1969,29 @@ PROXY lens:
   - Maintainer decisions recorded: access message v2; ownership counts only usable passes; GatePolicy
     and pass kind immutable; vectors published by nft-gate-client; repo-local audit canonical. OQ3, OQ4
     and the scheduling half of OQ10 stay open (Cloudflare plan, deploy reviewers and token scopes,
-    scheduled negative origin check, external review, mainnet publication).
+    scheduled negative origin check, external review, mainnet publication). *(The scheduled check was
+    added 2026-10-10; see the last log entry.)*
   - Template dates reconciled to the lens registry; pre-save consistency checklist run.
+
+- 2026-10-10 — Fix wave on `main` `9e33df6` (unreleased, no version bump here; commit pending).
+  - Fixed: F32 (RESOLVED: `origin-lock.yml` + `check-origin-locked.mjs`, daily, secret-free), F21
+    (RESOLVED: comments and dead `nonceMatches`), F30 (RESOLVED: five missing tests,
+    `gateway-state.test.ts`) and new F47 (RESOLVED: nft-gate-client 0.0.17 strict proof decoding, 27
+    shared reject vectors green in Node and workerd).
+  - Left open by decision: F11 (Cloudflare plan, OQ3 — maintainer), F16 and F31 (reviewers, API-token
+    scopes, token-expiry reminder — maintainer), F29 (the `unknown` bucket stays by design), F43 (no
+    `Via` marker; only if offered white-label), F45, F25, F34, F35 (accepted), adjudicated F20, F22, F23,
+    F36, F44.
+  - Final counts: 27 RESOLVED (the 23 above plus F21, F30, F32, F47), 3 MITIGATED (F16, F29, F31), 5
+    ADJUDICATED (F20, F22, F23, F36, F44), 5 ACCEPTED-RISK (F25, F34, F35, F43, F45), 1 DEFERRED (F11); 6
+    Positive (F37–F41, F46). 47 findings.
+  - Measured: vitest 230 tests (227 passed, 3 skipped; unit 145/3, workerd 82); `tsc` and `eslint` clean;
+    `npm ci` and `npm audit --audit-level=high` 0 vulnerabilities; `wrangler deploy --dry-run` builds;
+    `npm pack --dry-run` unchanged (the new scripts are not shipped); `scripts/sync-vectors.mjs --check`
+    and `scripts/check-versions.sh` pass.
+  - Live, read-only: `check-origin-locked.mjs` against the relay origin: three probes, all 401 from
+    Access. Not run: the GitHub workflow itself (nothing is pushed); the Worker is not deployed.
+  - OQ10 scheduling decided (daily, separate workflow). OQ3 and OQ4 stay open.
 
 ## Pre-save consistency checklist (this pass)
 
@@ -1928,10 +2001,10 @@ PROXY lens:
 - [x] Template line: base + WORKERS + TS + SUI_CLIENT + WALRUS + AUTH + PROXY, each dated as in the
   registry. IMG is not triggered (no image).
 - [x] Closing structure in order.
-- [x] Open questions: OQ3, OQ4 and the scheduling half of OQ10 open; the others carry a recorded
-  decision note, the dispositions moved on the findings.
+- [x] Open questions: OQ3 and OQ4 open; the others carry a recorded decision note (OQ10 decided
+  2026-10-10), the dispositions moved on the findings.
 - [x] Section D ↔ dispositions — ticked only for RESOLVED/MITIGATED-with-evidence items; unticked items
-  cite F11, F16/F31, F32 and the maintainer items.
+  cite F11, F16/F31 and the maintainer items.
 - [x] Executive summary reflects current dispositions.
-- [x] Counts and versions re-measured 2026-10-09.
+- [x] Counts and versions re-measured 2026-10-10.
 - [x] Re-verification log entry added.

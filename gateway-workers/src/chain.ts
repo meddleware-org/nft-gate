@@ -9,15 +9,16 @@
  *
  * Single-use verification is now **digest-first**: the access proof already carries the on-chain
  * `access_gate::consume` transaction digest, so the gateway fetches that exact transaction and
- * verifies it succeeded and emitted a matching `AccessConsumedEvent`. This is precise (bound to the
- * challenge nonce + sender + gate) and does not need the deprecated event-by-sender query.
+ * verifies it succeeded and emitted a matching `AccessConsumedEvent` for the proof's sender and the
+ * gate. This is precise and does not need the deprecated event-by-sender query. The event is
+ * deliberately not bound to the challenge nonce (the digest is the one-time token, redeemed once by
+ * the redemption store; audit F23).
  */
 
 import { SuiGrpcClient } from '@mysten/sui/grpc'
 import { ownsAccessNft } from '@meddleware/access-gate-client'
 import type { ChainQuery } from './verify.js'
 import { normalizeAddress, normalizeMoveType } from './verify.js'
-import { base64ToBytes } from './crypto.js'
 import type { SuiNetwork } from './config.js'
 
 type Json = unknown
@@ -311,27 +312,6 @@ export function gateBlocksAccess(gateJson: Json): boolean {
 export function isConsumedEvent(ev: Json, expectedType: string): boolean {
   const t = eventType(ev)
   return t !== undefined && normalizeMoveType(t) === normalizeMoveType(expectedType)
-}
-
-/**
- * Match the on-chain `AccessConsumedEvent.nonce` (`vector<u8>`), rendered by the API as either an
- * array of byte numbers or a base64 string, against the challenge nonce's UTF-8 bytes.
- */
-export function nonceMatches(eventNonce: Json, nonce: string): boolean {
-  const want = new TextEncoder().encode(nonce)
-  if (Array.isArray(eventNonce)) {
-    if (eventNonce.length !== want.length) return false
-    return eventNonce.every((b, i) => typeof b === 'number' && b === want[i])
-  }
-  if (typeof eventNonce === 'string') {
-    try {
-      const decoded = base64ToBytes(eventNonce)
-      return decoded.length === want.length && decoded.every((b, i) => b === want[i])
-    } catch {
-      return false
-    }
-  }
-  return false
 }
 
 /**

@@ -121,6 +121,12 @@ locked to this Worker via Cloudflare Access, then point `UPSTREAM_URL` at it.
 
 5. The Worker injects these headers on every upstream `fetch`. Direct browser or bot traffic to
    the origin gets an Access login page or `403`, depending on the policy fallback.
+6. Verify the lock stays in place. `Deploy Workers` checks that the origin **accepts** the token
+   (repository variable `UPSTREAM_CHECK_URL`); the `Origin lock` workflow
+   (`.github/workflows/origin-lock.yml`, daily and on demand) checks the opposite with
+   `scripts/check-origin-locked.mjs`: GET requests without a token, and with an unknown one, must be
+   refused by Access (401/403 with `cf-access-domain`, or a redirect to the Access login). It sends no
+   secret. A run fails when the origin answers, or is refused by anything other than Access.
 
 ## State backend
 

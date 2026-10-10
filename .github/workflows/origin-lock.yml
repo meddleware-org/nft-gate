@@ -1,0 +1,50 @@
+name: Origin lock
+
+# Scheduled NEGATIVE check of the relay origin lock (gateway-workers audit F32 / CF-M2). The relay
+# origin must be reachable only with the Worker's Cloudflare Access service token. Deploy Workers
+# proves the positive case (the token is accepted); this workflow proves the negative: direct requests
+# without the token, and with an unknown one, must be refused by Access.
+#
+# Read-only and secret-free: it sends GET requests to the origin hostname held in the repository
+# VARIABLE `UPSTREAM_CHECK_URL` (a public URL, not a secret) and sends no credential. A failed run
+# means the origin answered, or was refused by something other than Access, or could not be reached:
+# check the Access application ("Walrus relay origin (nft-gate Worker only)") in Cloudflare Zero Trust
+# first (docs/networking/CLOUDFLARE.md section 2.4 in the workspace repository).
+#
+# GitHub disables scheduled workflows after 60 days without repository activity; a manual run
+# (workflow_dispatch) re-enables the schedule.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/origin-lock.yml'
+      - 'gateway-workers/scripts/check-origin-locked.mjs'
+      - 'gateway-workers/scripts/origin-lock.ts'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: origin-lock
+  cancel-in-progress: true
+
+jobs:
+  origin-lock:
+    name: Origin refuses direct requests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+
+      - name: Direct requests without the service token are refused by Access
+        working-directory: gateway-workers
+        env:
+          UPSTREAM_CHECK_URL: ${{ vars.UPSTREAM_CHECK_URL }}
+        run: node scripts/check-origin-locked.mjs

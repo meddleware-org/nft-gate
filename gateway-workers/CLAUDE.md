@@ -77,8 +77,8 @@ unset the workflow runs plain `wrangler deploy`, keeping the secrets stored in C
 
 **Fallback: Workers KV** (`NONCE_KV` binding, `NONCE_BACKEND=kv`)
 - Eventually consistent — `get` then `delete` is NOT atomic. In `SINGLE_USE=false` mode, a nonce
-  could momentarily read valid in two regions within its TTL. In `SINGLE_USE=true` mode, the
-  on-chain `AccessConsumedEvent` remains the authoritative single-use bind (unaffected).
+  could momentarily read valid in two regions within its TTL.
+- `SINGLE_USE=true` refuses this backend: redemptions need the Durable Object's atomic per-key state.
 - Use the DO backend when cross-region replay atomicity matters.
 
 **Quota-degrade flag:** When the DO free-tier usage approaches a limit, the quota guard (cron)

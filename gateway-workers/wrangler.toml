@@ -1,6 +1,6 @@
 # nft-gate-gateway — Cloudflare Workers deployment.
 #
-# Wire-identical to the Rust gateway (../gateway). Bind it to the SAME public hostname the
+# Wire-identical to the Rust gateway (../gateway-rust). Bind it to the SAME public hostname the
 # Rust gateway serves (see [routes] below) to switch implementations with nothing else changing.
 #
 # OPERATOR SETUP — run these once before deploying, then never touch them again:

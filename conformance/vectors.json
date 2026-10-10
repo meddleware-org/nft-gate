@@ -157,7 +157,7 @@
     }
   },
   "proofDecodeRejects": {
-    "description": "Tokens every decoder must reject before verification (size, ASCII, and the field grammar).",
+    "description": "Tokens every decoder must reject before verification: size, ASCII, the field grammar, and the base64 (canonical padded standard alphabet, no inner whitespace), UTF-8 (strict, no BOM) and JSON (nesting depth 127, no unpaired surrogate escape, no overflowing number) layers underneath it.",
     "cases": [
       {
         "name": "oversized",
@@ -222,6 +222,50 @@
       {
         "name": "JSON null",
         "token": "bnVsbA=="
+      },
+      {
+        "name": "unpadded base64",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImsiOiJhIn0"
+      },
+      {
+        "name": "whitespace inside the token",
+        "token": "eyJhZGRy\nZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSJ9"
+      },
+      {
+        "name": "padding in the middle of the token",
+        "token": "eyJhZGRy=ZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSJ9"
+      },
+      {
+        "name": "more padding than base64 allows",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImsiOiJhIn0=="
+      },
+      {
+        "name": "non-zero trailing bits in the last base64 symbol",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImsiOiJhIn1="
+      },
+      {
+        "name": "URL-safe base64 alphabet",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImsiOiJ-fn4_Pz8-Pj4ifQ=="
+      },
+      {
+        "name": "invalid UTF-8 inside an unknown key",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsIv/+IjoxfQ=="
+      },
+      {
+        "name": "UTF-8 byte-order mark before the JSON",
+        "token": "77u/eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSJ9"
+      },
+      {
+        "name": "unpaired surrogate escape in an unknown key",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsIlx1ZDgwMCI6MX0="
+      },
+      {
+        "name": "number out of range in an unknown value",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImsiOjFlOTk5fQ=="
+      },
+      {
+        "name": "JSON nested 128 levels deep",
+        "token": "eyJhZGRyZXNzIjoiMHgxIiwibm9uY2UiOiJuIiwic2lnbmF0dXJlIjoiQUFBQSIsImsiOltbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tdXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dfQ=="
       }
     ]
   },

@@ -4,8 +4,15 @@ All notable changes to `@meddleware/nft-gate-gateway` are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- `Origin lock` workflow (`.github/workflows/origin-lock.yml`, daily and on demand) with `scripts/check-origin-locked.mjs`: the scheduled negative check of the relay origin lock (audit F32). It sends GET requests without a token, and with an unknown one, to the origin in the repository variable `UPSTREAM_CHECK_URL` and fails unless Cloudflare Access refuses each. No secret involved. Unit-tested (`test/origin-lock.test.ts`).
+- Tests: the new proof-decode reject vectors in the workerd router suite; public-path rate limit, IPv6 /64 keying, gated responses never cached, store outage as 503 and the quota-degrade flag (`test/gateway-state.test.ts`).
+
 ### Changed
 
+- `@meddleware/nft-gate-client` ^0.0.17 (strict base64, UTF-8 and JSON proof decoding) and the refreshed `conformance/vectors.json` (11 new `proofDecodeRejects`); closes the base64-layer parity finding for this Worker.
+- Comments only: `chain.ts` module doc, `cors.ts`, `wrangler.toml` header and the `proxy.ts` `@ts-expect-error` note now describe the current behaviour; the unused `nonceMatches` helper is removed.
 - `NFT_TYPE` and `GATE_ID` in `wrangler.toml` name the 2026-10-09 testnet publication (access_gate `0xd7ddaa94…`, relay gate `0x316f1bf9…`); deploy together with the apps' `VITE_ACCESS_GATE_ID_TESTNET`.
 
 ## [0.0.21] - 2026-10-08

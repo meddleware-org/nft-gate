@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest'
 import { env, createExecutionContext } from 'cloudflare:test'
 import worker from '../src/index.js'
 import type { Env } from '../src/config.js'
+import { decodeAccessProof } from '../src/wire.js'
+import vectors from '../../conformance/vectors.json'
 
 const e = env as unknown as Env
 
@@ -46,6 +48,22 @@ describe('router', () => {
     expect(res.status).toBe(403)
     expect(await res.json()).toEqual({ error: 'malformed access proof' })
   })
+
+  // The shared reject vectors, run in the workerd runtime (its own atob / TextDecoder / JSON.parse
+  // glue, not Node's): every token the client's strict decoder must refuse is a 403 at the door.
+  // A token with a newline cannot ride in a header value, so it is exercised through the decoder.
+  for (const [i, c] of vectors.proofDecodeRejects.cases.entries()) {
+    it(`refuses a malformed proof in workerd: ${c.name}`, async () => {
+      expect(() => decodeAccessProof(c.token)).toThrow()
+      if (/[\r\n]/.test(c.token)) return
+      const res = await call('POST', '/v1/blob-upload', {
+        authorization: `Bearer ${c.token}`,
+        'CF-Connecting-IP': `198.51.100.${i + 1}`,
+      })
+      expect(res.status).toBe(403)
+      expect(await res.json()).toEqual({ error: 'malformed access proof' })
+    })
+  }
 
   it('OPTIONS /v1/challenge → 204 preflight with CORS headers for allowed origin', async () => {
     const res = await call('OPTIONS', '/v1/challenge', { origin: ALLOWED_ORIGIN })

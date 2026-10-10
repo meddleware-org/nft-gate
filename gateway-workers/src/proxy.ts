@@ -125,7 +125,8 @@ export async function forward(cfg: Config, request: Request): Promise<Response> 
       signal,
       // Never follow: the Access service-token headers would be re-sent to the `Location` host.
       redirect: 'manual',
-      // @ts-expect-error — CF Workers supports streaming body via ReadableStream without 'duplex'
+      // `duplex` is missing from the Workers RequestInit type; the runtime accepts it for a streaming body.
+      // @ts-expect-error — see above
       duplex: 'half',
     })
   } catch {
