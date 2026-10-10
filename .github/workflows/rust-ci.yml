@@ -37,7 +37,7 @@ jobs:
       # rustup ships on the runner image; using it directly leaves no third-party toolchain action
       # (which publishes no releases, only a moving branch) to pin.
       - name: Install the stable toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy,llvm-tools-preview --no-self-update && rustup default stable
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy,llvm-tools --no-self-update && rustup default stable
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

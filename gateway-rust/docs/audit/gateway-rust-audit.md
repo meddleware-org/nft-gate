@@ -15,6 +15,8 @@
   Workers gateway but is scoped to small-body upstreams (bodies are buffered, README "Scope"), so the
   paywall runs on `gateway-workers` only (root `CLAUDE.md`). No overlay, manifest or
   `config/images.yaml` entry exists.
+- 0.0.22 (committed locally 2026-10-10, not yet tagged or published) carries the fixes recorded below: F17, F21,
+  F26, F28, F29 (CI and Docker parts), F45, F46, F47; both gateways move together (D16).
 - Crate `nft-gate-gateway` **0.0.21** on crates.io (published 2026-10-08T08:19Z; 0.0.18–0.0.21 since
   the first pass; trusted publishing, run of tag `v0.0.21` succeeded).
 - Image `quay.io/meddleware-org/nft-gate-gateway:0.0.21` (multi-arch index
@@ -29,14 +31,15 @@
   publication) **only through operator env**; the superseded `0xa55789…` / `0xfd6c3b…` appear only in
   the env-gated live test (F45, B.SC-1).
 
-**Review date:** 2026-10-03 (re-verified 2026-10-09)
+**Review date:** 2026-10-03 (re-verified 2026-10-09; fix wave 2026-10-10)
 **Reviewer:** Internal review
 **Severity ceiling:** High — a verification bypass would admit unpaid traffic to the protected
   upstream, and a redemption-store failure would let one paid single-use consume buy unlimited
   uploads. The gateway holds no user funds and signs nothing on-chain, so nothing here reaches
   Critical.
-**Status:** re-verified 2026-10-09 — 40 findings dispositioned (17 RESOLVED, 2 MITIGATED, 6 ADJUDICATED,
-  9 ACCEPTED-RISK, 6 DEFERRED) plus 8 Positive; F42–F48 added in this pass
+**Status:** fix wave 2026-10-10 (0.0.22, commit pending) — 40 findings dispositioned (24 RESOLVED,
+  3 MITIGATED, 6 ADJUDICATED, 4 ACCEPTED-RISK, 3 DEFERRED) plus 8 Positive; re-verified 2026-10-09, F42–F48
+  added in that pass
 
 **Toolchain:** `rust-version = "1.88"` (Cargo.toml; MSRV job in `rust-ci.yml`) — no
   `rust-toolchain.toml`   **Edition:** 2021
@@ -144,22 +147,23 @@ changes only `Cargo.toml`/`Cargo.lock`).
 **What remains.** Nothing at Medium. The open items are Low/Info and concentrate in three groups, none
 of which touches the live Workers deployment:
 
-- *Parity gaps accepted while undeployed* (ACCEPTED-RISK, each recorded as a pre-deployment gate in
-  Section D): ownership listing reads one page of 50 (F17); the consume check infers success from the
-  event instead of the effects status (F21); the startup log prints `UPSTREAM_URL` (F26); the lease
-  startup check ignores the body-read time (F46); no `Via` loop marker (F43); the in-memory store's O(n)
-  work and cap-eviction (F11, F34); test gaps against the RUST and PROXY lenses (F47).
-- *Supply chain and image* (DEFERRED): CI lacks `--locked` on test/clippy, `cargo audit` and a coverage
-  figure (F28); no image scan before signing, no published `cosign verify` command, an SBOM that may
-  list base layers only, an unsigned private mirror and an incomplete `.dockerignore` (F29); registry
-  credential inventory (F30, `OPERATOR_TASKS.md`).
+- *Accepted* (ACCEPTED-RISK): no `Via` loop marker, left open for parity with the Workers gateway (F43);
+  the in-memory store's O(n) work and cap-eviction (F11, F34).
+- *Supply chain and image*: the CI and Docker work is done in 0.0.22 (`--locked`, a coverage figure,
+  the Redis round trip in CI, a Trivy image scan before signing, a lockfile in the image for the SBOM, a
+  complete `.dockerignore`, a published `cosign verify` command; F28, F29). What remains is the
+  unsigned private mirror and licence notices (F29, OQ8) and the registry credential inventory (F30,
+  `OPERATOR_TASKS.md`).
 - *Deployment* (DEFERRED, tied to OQ9, the decision to deploy): runtime credential rotation (F31) and
   manifests, pod security, limits and the origin-lock check (F32).
 
-One new problem was found in this pass: the env-gated live test, the only check of the hand-rolled
-gRPC field numbers against a real fullnode, **fails** today because the public fullnode has pruned its
-fixed historic transaction (F45). It is not a code defect, but it means the ABI-drift check is not
-currently green.
+**Fix wave of 2026-10-10 (0.0.22).** The parity and pre-deployment gaps are closed: ownership reads every
+page up to a bound (F17), single-use success is decided from the effects status (F21), the upstream
+origin is never logged and URL credentials are refused (F26), the lease outlives the body-read and
+upstream deadlines together (F46), and router-level tests pin the status and conflict mapping (F47). The
+env-gated live test that failed on a pruned fixed transaction (F45) is replaced by hermetic wire-format
+fixtures plus optional live checks that take a fresh consume from the environment; both live checks
+passed against testnet on 2026-10-10.
 
 **Verified strengths.** The cryptographic core is sound and pinned by shared vectors that include
 negatives (high-S on both curves, a non-canonical ed25519 `s`, wrong intent, truncated input, flags
@@ -174,8 +178,8 @@ negatives (high-S on both curves, a non-canonical ed25519 `s`, wrong intent, tru
   provenance attestations, crates.io OIDC), and the release job runs the same workflow as CI.
 
 **Posture.** A hardened, parity-complete gateway for small-body upstreams that is deliberately not
-deployed. Before it fronts anything, close the pre-deployment gates in Section D (F17, F21, F26, F28,
-F29, F31, F32, F45–F47) and decide OQ9. No open finding is above Low; the Medium findings of the first pass
+deployed. Before it fronts anything, close the remaining pre-deployment gates in Section D (F31, F32) and
+decide OQ9. No open finding is above Low; the Medium findings of the first pass
 (F1–F5, F7) are resolved.
 
 ---
@@ -299,12 +303,13 @@ and `Cargo.lock` only); its Rust CI run succeeded, and the local tree was not ad
 
 | Command | Result |
 | --- | --- |
-| `cargo test --locked --offline` | **93 tests: 91 passed, 0 failed, 2 ignored** (`sui_rpc::tests::live_consume_tx_valid`, `challenge::tests::redis_backend_round_trip`); first pass 71 / 69 / 2 |
+| `cargo test --locked --offline` | 2026-10-09: 93 tests (91 passed, 2 ignored). **2026-10-10 (0.0.22): 117 tests: 114 passed, 0 failed, 3 ignored** (`live_gate_and_ownership_requests_are_accepted`, `live_consume_tx_valid`, `challenge::tests::redis_backend_round_trip`); first pass 71 / 69 / 2 |
 | `cargo fmt --check` | clean |
 | `cargo clippy --locked --offline --all-targets -- -D warnings` | clean |
-| `cargo test --locked --offline -- --ignored live_` | **fails** at the first assertion (`src/sui_rpc.rs:679`): the public testnet fullnode answers `grpc-status: 5` (NOT_FOUND) for the fixed digest, `x-sui-lowest-available-checkpoint` 391126037 (confirmed with a hand-built gRPC-web `GetTransaction` request). The transaction was pruned; the code failed closed as designed. See F45. |
+| `cargo test --locked -- --ignored live_` | 2026-10-09: the old fixed-digest test **failed** (NOT_FOUND, `x-sui-lowest-available-checkpoint` 391126037: pruned; F45). 2026-10-10 after the fix: `live_gate_and_ownership_requests_are_accepted` passes; `live_consume_tx_valid` passes with a recent consume on the current relay gate (`NFT_GATE_LIVE_*`), which also confirms the `effects.status` field numbers (F21) |
+| `cargo llvm-cov --locked --summary-only` | 2026-10-10, local: 90.7 % of lines, 91.4 % of functions, 90.1 % of regions (test code included in the denominator) |
 | `redis_backend_round_trip` | not run (needs `REDIS_URL`; not in CI, S2) |
-| `cargo deny` / `cargo audit` | not installed locally. `cargo-deny-action` is green in CI on `main` (Rust CI run of 2026-10-09T17:52Z on `85b18e1`); `cargo audit` is not run anywhere (F28). Dependabot security alerts are disabled for the repository (API 403). |
+| `cargo deny` / `cargo audit` | not installed locally. `cargo-deny-action` is green in CI on `main` (Rust CI run of 2026-10-09T17:52Z on `85b18e1`); `cargo audit` is covered by cargo-deny's `advisories` check (same RustSec database, F28). Dependabot security alerts are disabled for the repository (API 403). |
 | Published versions | crates.io `nft-gate-gateway` max 0.0.21 (2026-10-08T08:19Z, none yanked); npm sibling 0.0.21; quay.io `nft-gate-gateway:0.0.21` present (index `sha256:f7d627eb…9281`) |
 | Dependabot | `.github/dependabot.yml`: weekly, grouped; npm (`/gateway-workers`), cargo and docker (`/gateway-rust`), github-actions. 2026-10-09 triage: merged cargo group, distroless digest, `ed25519-dalek` 3.0.0 (dev-dependency), `blake2` 0.11.0, Actions group; closed `k256`/`p256` 0.14 (PRs #4, #6, major declined), TypeScript 7 and vitest 5 (Workers). |
 
@@ -777,9 +782,9 @@ vector (S1).
 
 ### F17 — `ListOwnedObjects` reads one page of 50 without a cursor; Workers paginates
 
-**Severity:** Low   **Disposition:** ACCEPTED-RISK (undeployed; must be closed before deployment, Section D pre-testnet, OQ9)
-**Where:** `src/sui_rpc.rs:96-115` (`page_size` 50, no `page_token` loop).
-
+**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Where:** `src/sui_rpc.rs` (`scan_owned`, `build_list_owned`, `MAX_OWNED_PAGES`); before 0.0.22 `owns_nft_live`
+sent `page_size` 50 and read the first page only.
 **Issue:** A holder whose qualifying pass is beyond the first 50 objects of `NFT_TYPE` is denied. This
 fails closed. `gateway-workers` reads every page via `ownsAccessNft` (up to `MAX_OWNED_PAGES`), so the
 two gateways decide differently for the same address. This is the "one page of N is a GAP" case of
@@ -787,12 +792,17 @@ the Sui client lens §A *Events*.
 
 **Impact:** Wrongful denial for large holders (bulk buyers) on the Rust gateway only.
 
-**Remediation / evidence:** Unchanged: `sui_rpc.rs::owns_nft_live` sends `page_size` 50 and reads the first page only (no
-`page_token` loop). It fails closed, but together with F7 the first page can hold exhausted receipts
-while a usable pass sits on page two, and `gateway-workers` reads every page (`ownsAccessNft`), so the
-two gateways still decide differently for such an address. Accepted while the gateway is undeployed;
-the fix is a bounded cursor loop failing closed past the bound, with a two-page test. The Workers
-audit's B.SC-3 row for pagination defers to this audit.
+**Remediation / evidence:** Fixed in 0.0.22. `sui_rpc.rs::scan_owned` reads `ListOwnedObjects` page by page (50 per page,
+`page_token` = field 3, `next_page_token` = field 2, both checked against the `@mysten/sui` generated
+proto), stops at the first usable pass for the gate, and errors past `MAX_OWNED_PAGES` = 100 (the Workers
+gateway's bound: 5,000 objects of the pass type), so the two gateways decide alike. Past the bound the answer
+is a chain error (502, denied), never "no" or "yes". The whole listing shares one `RPC_TIMEOUT_SECS`
+deadline. Pinned by `ownership_is_read_across_pages_until_a_usable_pass` (an exhausted receipt on page one,
+the usable pass on page two, token echoed), `a_pass_on_the_first_page_stops_the_scan`,
+`the_last_page_without_a_usable_pass_is_not_ownership`, `an_endless_list_is_an_error_after_the_page_bound`
+(exactly 100 calls), `a_node_error_on_a_later_page_fails_the_check` and
+`build_list_owned_encodes_the_page_token_only_when_continuing`; live: `live_gate_and_ownership_requests_are_accepted`
+(2026-10-10, passes). The Workers audit's B.SC-3 pagination row can now say "same".
 
 ### F18 — Ownership cache is unbounded when enabled
 
@@ -846,10 +856,8 @@ released: the token no longer matches). Recorded so the operator-cost trade-off 
 
 ### F21 — Single-use check relies on "events imply success" instead of the effects status
 
-**Severity:** Low   **Disposition:** ACCEPTED-RISK (undeployed; must be closed before deployment, Section D pre-testnet)
-**Where:** `src/sui_rpc.rs:141-190` (`build_get_transaction` masks only `events`;
-`response_has_consume` has no status check — the comment at `:155-157` justifies it).
-
+**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Where:** `src/sui_rpc.rs` (`build_get_transaction`, `effects_succeeded`, `response_has_consume`).
 **Issue:** The Sui client lens §A *Execution result* requires success to be decided by the effects
 status. On Sui a failed transaction emits no events, so the inference is correct today. But the
 Workers gateway checks `$kind === 'Transaction' && status.success`, so the two gateways rely on
@@ -857,12 +865,15 @@ different properties.
 
 **Impact:** No exploit today. It is a parity and lens-conformance gap.
 
-**Remediation / evidence:** Unchanged: `build_get_transaction` masks only `events`, and `response_has_consume` has no effects-status
-check (its doc says a failed transaction emits no events, so none is needed). That is true on Sui, so
-there is no exploit; the SC lens (§A *Execution result*) still wants success decided from the effects
-status, and `gateway-workers` does so. The Workers audit's B.SC-3 row records a success check for Rust
-"(0.0.19)": it is not in this crate. Accepted while undeployed; before deployment add `effects.status`
-to the read mask, require success, and add a failed-status fixture.
+**Remediation / evidence:** Fixed in 0.0.22. `build_get_transaction` masks `effects.status` and `events`, and
+`response_has_consume` first requires `effects_succeeded` (`ExecutedTransaction.effects` = 4,
+`TransactionEffects.status` = 4, `ExecutionStatus.success` = 1 with value 1; a missing effects block, a
+missing status or `success`, or `false` all deny), as `gateway-workers` does with `status.success`.
+Pinned by `only_a_successful_transaction_can_be_a_consume` (failed, no status, error-only status, each with a
+matching event), `a_failed_transaction_with_a_matching_event_is_not_a_consume`,
+`consume_verification_reads_a_response_in_the_pinned_wire_format` (literal field numbers) and the router test
+`a_failed_or_unreadable_consume_never_reaches_the_upstream` (403). The field numbers were confirmed against the
+real testnet fullnode with a recent consume on 2026-10-10 (`live_consume_tx_valid`, passes).
 
 ### F22 — Consume binding checks the event `sender`, not the event's `consumer` field
 
@@ -937,9 +948,8 @@ attacker-reachable).
 
 ### F26 — Startup log prints `UPSTREAM_URL`
 
-**Severity:** Info   **Disposition:** ACCEPTED-RISK (undeployed; decide at deployment whether the origin is secret, OQ9)
-**Where:** `src/main.rs:291` (`upstream = %cfg.upstream_url`).
-
+**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Where:** `src/main.rs` (startup `tracing::info!`), `src/config.rs` (`Debug`, `check_scheme`).
 **Issue:** The full upstream URL is logged at `info`. The Workers deployment treats the same value as
 a secret ("so the private origin never appears in this public file"), and an operator may embed
 userinfo in it.
@@ -947,15 +957,16 @@ userinfo in it.
 **Impact:** Disclosure of the private origin (bypass target if the origin lock is weak) or of
 credentials to anyone who can read logs.
 
-**Remediation / evidence:** Unchanged: `main.rs:366` still logs `upstream = %cfg.upstream_url` at `info`, `GatewayConfig`'s `Debug`
-prints it, and `check_scheme` does not reject userinfo (S8). Credentials have their own redacted channel
-(`UPSTREAM_AUTH_HEADERS`, `REDIS_URL`; test `debug_redacts_credentials`). Accepted while undeployed. At
-deployment, decide whether the origin is a secret as it is on the Worker; if so log scheme and host
-only and reject userinfo.
+**Remediation / evidence:** Fixed in 0.0.22 by the single option that needs no decision about whether the origin is secret: it is
+never logged. The startup `info` line no longer carries `UPSTREAM_URL`, `GatewayConfig`'s `Debug` prints
+`<redacted>` for the upstream and the RPC URL (an RPC provider key may sit in its path), and
+`check_scheme` refuses userinfo in `UPSTREAM_URL` and `SUI_RPC_URL` (credentials belong in
+`UPSTREAM_AUTH_HEADERS` / `SUI_RPC_AUTH_HEADER`), as `gateway-workers` already did. Pinned by
+`debug_redacts_credentials` (private origin and a path key are absent) and `urls_must_not_carry_credentials`.
 
 ### F27 — Documentation drift (deployment targets, links, module docs)
 
-**Severity:** Info   **Disposition:** MITIGATED (the main drift is fixed; cosmetic items remain)
+**Severity:** Info   **Disposition:** MITIGATED (fixed in 0.0.22 except the `wrangler.toml` comment in `gateway-workers/`; commit pending)
 **Where:**
 
 - `gateway-rust/CLAUDE.md`: "Published to GHCR" (the workflow pushes to quay.io + Docker Hub); "See
@@ -979,37 +990,36 @@ only and reject userinfo.
 
 No behavioural effect; correct each line at the next docs pass.
 
+Update 2026-10-10 (0.0.22 docs): fixed in `gateway-rust/CLAUDE.md` (quay.io and Docker Hub, no `k8s` tree,
+the three limiters), root `README.md` (the `access-gate-sui` link and the small-body caveat), root `CLAUDE.md`
+(the "drop-in" caveat, the live test name) and `gateway-rust/README.md` (the `distroless/cc-debian13` base).
+Still stale: `gateway-workers/wrangler.toml:3-4` calls the Rust gateway `../gateway` (a Workers-side file,
+left for the Workers pass); that is why this stays MITIGATED.
+
 ### F28 — CI omissions: `--locked` on test/clippy, `cargo audit`, coverage figure, toolchain-action pin
 
-**Severity:** Info   **Disposition:** DEFERRED (RUST lens §D pre-localnet items: `cargo audit` and a coverage figure; scheduled with the deployment decision, OQ9)
-**Where:** `.github/workflows/rust-ci.yml`:
-
-- `:44-50`: `cargo clippy` and `cargo test` without `--locked`.
-- No `cargo audit` step: cargo-deny's `advisories` check uses the same RustSec database, but the RUST
-  lens §B.1 names both.
-- No coverage tool.
-- `dtolnay/rust-toolchain@02cb101e… # master` is pinned to a SHA on a branch, not a release (that
-  action publishes no releases).
-
+**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Where:** `.github/workflows/rust-ci.yml` (and `crates-publish.yml` for the toolchain step).
 **Issue / Impact:** Lockfile drift would not fail CI. The lens's coverage-figure requirement is unmet.
 
-**Remediation / evidence:** State at 2026-10-09: `rust-ci.yml` still runs `cargo clippy` and `cargo test` without `--locked` (the
-MSRV job and the Dockerfile use it), has no `cargo audit` (the RUST lens, 2026-10-08, §B.1 names `cargo
-audit` and `cargo deny`) and no coverage tool, and pins `dtolnay/rust-toolchain` to a `master` commit.
-Improved: `rust-ci.yml` has `workflow_call` and both publish workflows run it as a `verify` job, so a tag
-cannot ship what CI refuses; `cargo-deny-action` runs and is green on `main`. Remaining work is a CI
-edit (add `--locked`, `cargo audit` or `cargo-deny` plus the lens note that advisories share the RustSec
-database, `cargo llvm-cov`); it was not done in this alignment.
+**Remediation / evidence:** Fixed in `rust-ci.yml` (CI-only; not runnable locally, YAML validated and each command run by hand):
+`cargo clippy --all-targets --locked` and `cargo test --locked`; `cargo audit` is not added as a second tool
+because `cargo-deny`'s `advisories` check (already green in CI, `yanked = "deny"`) reads the same RustSec
+database, which the job comment now states; a coverage step runs `cargo llvm-cov --locked --summary-only`
+(`cargo-llvm-cov` 0.9.1 via `taiki-e/install-action`, pinned to the v2.87.27 SHA) and writes the figure to the job
+summary (informational, not a gate; local figure 90.7 % of lines); the toolchain is installed with `rustup` on the runner
+instead of `dtolnay/rust-toolchain`, whose only reference is a moving `master` branch (the MSRV job and
+`crates-publish.yml` likewise), so no unpinnable action remains; and a Redis service container runs
+`redis_backend_round_trip` (S2).
 
 ### F29 — Image supply chain: no image vulnerability scan; unsigned private-registry mirror; `.dockerignore` gaps
 
-**Severity:** Low   **Disposition:** DEFERRED (pending OQ8; mainnet gate "signature, SBOM and provenance on every pushed image and a clean image scan")
+**Severity:** Low   **Disposition:** MITIGATED (0.0.22; commit pending; the private mirror and licence notices need OQ8)
 **Where:**
 
-- `.github/workflows/rust-ci.yml:72-90`: Trivy `scan-type: config` only.
-- `docker-publish.yml` `build-docker-*-private` jobs: `continue-on-error: true`, no cosign, no SBOM.
-- `gateway-rust/.dockerignore`: `target/ .git/ *.md` only.
-
+- `.github/workflows/docker-publish.yml` (Trivy image scan before signing, merge job); `build-docker-*-private`
+  jobs: `continue-on-error: true`, no cosign, no SBOM (open, OQ8).
+- `gateway-rust/Dockerfile` (`Cargo.lock` copied into the runtime stage), `gateway-rust/.dockerignore`.
 **Issue:**
 
 - The IMG lens requires the scanner on the **image** with its result recorded.
@@ -1020,23 +1030,17 @@ database, `cargo llvm-cov`); it was not done in this alignment.
 
 **Impact:** Unscanned published images, and a possible unsigned deployment path.
 
-**Remediation / evidence:** State against the IMG lens (2026-10-08):
-
-- Holds: every `FROM` is digest-pinned (Dependabot's docker group keeps the distroless digest current,
-  `5c34762`); non-root runtime; dependencies from the lockfile (`cargo chef cook --locked`,
-  `cargo build --locked`, `cargo-chef` 0.1.78 `--locked`); no secrets in `ARG`/`ENV`/`COPY`/`RUN`.
-- **Scan before sign: not done.** Trivy runs as `scan-type: config` on the Dockerfile only; no
-  `trivy image` on the built or merged image.
-- **SBOM completeness: unverified.** `anchore/sbom-action` scans the pushed image; a binary from plain
-  `cargo build` carries no crate list and `Cargo.lock` is not in the image, so the SBOM probably lists
-  the Debian base only (the attestation was not fetched). Fix: `cargo auditable` or ship the lockfile.
-- Licence notices for the compiled crates are not shipped in the image.
-- **Verification command:** none is published (README, `SECURITY.md`) that pins the workflow identity.
-- Toolchain match: CI compiles with `stable`, the image with the digest-pinned `rust:1-slim`; not compared.
-- Private mirror (`build-docker-*-private`): `continue-on-error: true`, no cosign or SBOM. It is
-  best-effort and unsigned; the cluster would have to pull from quay.io by digest (OQ8).
-- `.dockerignore` is still `target/ .git/ *.md`: `.env*` is not excluded (only the binary reaches the
-  runtime stage).
+**Remediation / evidence:** Done in 0.0.22 (CI and Docker only): `docker-publish.yml` scans the merged public image by digest with
+Trivy (`scan-type: image`, `vuln,secret`, HIGH and CRITICAL with a fix fail the job) before cosign signs or
+attests anything; the image ships `Cargo.lock` so the SBOM (`anchore/sbom-action`) lists the compiled crates
+rather than the Debian base alone (not re-fetched: needs a published 0.0.22); `.dockerignore` now excludes
+`.env*`, `*.pem`, `*.key`, `docs/` and itself; the README publishes the `cosign verify` and
+`verify-attestation` commands pinned to the `docker-publish.yml` tag identity, and says the mirror is
+unsigned. The scan step cannot be exercised without registry credentials (not run here). Still open, all
+tied to OQ8 or a toolchain choice: the self-hosted mirror stays an unsigned best-effort copy
+(`build-docker-*-private`, `continue-on-error`) until the maintainer decides the cluster pulls from quay.io by
+digest; licence notices for the compiled crates are not shipped; CI compiles with `stable`, the image with the
+digest-pinned `rust:1-slim`, and the two are not compared.
 
 ### F30 — Registry credentials are long-lived tokens without a recorded inventory
 
@@ -1270,6 +1274,11 @@ limiter and the concurrency cap. Operator-only misconfiguration, not attacker-re
 offered white-label with operator-chosen upstreams, add a `Via`/marker check that returns `508`;
 `registry-auth-proxy` 0.1.6 has one.
 
+Update 2026-10-10: left open for parity. The single fix is a `Via`/marker check that returns `508` in both
+gateways at once; doing it only here would make the two decide differently, and the Workers side is outside
+this change. Recommendation: add it to both when a white-label deployment with operator-chosen upstreams is
+planned.
+
 ### F44 — Upstream error statuses and bodies pass through to the client
 
 **Severity:** Info   **Disposition:** ADJUDICATED
@@ -1292,9 +1301,8 @@ releases the lease so the consume is not lost. Revisit if a third-party upstream
 
 ### F45 — The env-gated live test fails: its fixed historic transaction was pruned by the public fullnode (found 2026-10-10)
 
-**Severity:** Low   **Disposition:** DEFERRED (maintainer: choose a durable fixture or a localnet path, then refresh it; no `OPERATOR_TASKS.md` item yet; gate: Section D pre-testnet "ABI-drift test green")
-**Where:** `src/sui_rpc.rs::tests::live_consume_tx_valid` (lines 656-702).
-
+**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit pending; OQ10 decided)
+**Where:** `src/sui_rpc.rs::tests` (hermetic fixtures, `live_*`); `README.md` "Build and test".
 **Issue:** The test replays one fixed `access_gate::consume` on the **superseded** testnet package
 `0xa55789d7…886d41` and gate `0xfd6c3b2a…0ab8a6` (digest `8br5PGrz…TgUkP`). Using the superseded ids is
 deliberate and correct: both packages are immutable since 2026-10-09 (upgrade caps burned), so the
@@ -1309,18 +1317,23 @@ is not in CI (`#[ignore]`). With it red, protobuf field-number or JSON-shape dri
 would not be noticed. It is not a defect in the gateway code, and it does not affect the live Workers
 gateway, which has its own integration test (3 passing on 2026-10-09).
 
-**Remediation / evidence:** Any fixed testnet digest ages out in about a week at the public fullnode's
-retention. Options: (a) take a fresh consume on the current relay gate `0x316f1bf9…faddc` (the
-2026-10-09 paywall e2e consumed one) and refresh the digest, gate and address, accepting that it will
-age out again; (b) generate the consume inside the test against a localnet; (c) run against an
-archival endpoint. This is a maintainer choice (it costs a pass); the code is untouched here.
+**Remediation / evidence:** Decided and fixed in 0.0.22 (OQ10). The fixed historic digest is gone from the source. The wire format is
+pinned by hermetic gRPC-web fixtures that need no network and no transaction, using literal field numbers
+(not the constants): `consume_verification_reads_a_response_in_the_pinned_wire_format`,
+`gate_read_uses_the_pinned_get_object_wire_format`, the paged `ListOwnedObjects` tests and
+`only_not_found_is_retried_and_ends_as_denied`. The real-node check stays optional and `--ignored`:
+`live_gate_and_ownership_requests_are_accepted` needs no fixture (it reads the long-lived testnet relay gate
+and lists a pass-less address, so it cannot age out) and `live_consume_tx_valid` takes a recent consume from
+`NFT_GATE_LIVE_DIGEST`, `_SENDER`, `_GATE`, `_PACKAGE` (and `_RPC`), documented in the README, and says so
+and returns when no digest is given. Both passed on 2026-10-10 against `fullnode.testnet.sui.io` (a consume on
+the current relay gate found with the GraphQL events query), which also confirmed the new `effects.status`
+field numbers (F21). A localnet path was not chosen (it needs a fresh `access_gate` publication per run)
+and an archival endpoint is an operator dependency.
 
 ### F46 — The lease startup check ignores the body-read time
 
-**Severity:** Low   **Disposition:** ACCEPTED-RISK (defaults are safe: 30 s + 600 s < 900 s; close before deployment, Section D pre-testnet)
-**Where:** `src/config.rs` (`redemption_lease_ttl_secs <= upstream_timeout_secs` is the only check);
-`src/main.rs::redeem_and_forward` (the lease is taken before `proxy::forward` reads the body).
-
+**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Where:** `src/config.rs` (`from_lookup`: the lease check); `src/main.rs::redeem_and_forward` takes the lease before `proxy::forward` reads the body.
 **Issue:** The PROXY lens §A *Admission state* wants the claim's lifetime to exceed the maximum request
 time, checked at startup. The maximum request time here is the body-read deadline plus the upstream
 deadline, but only the latter is checked. `BODY_READ_TIMEOUT_SECS` can be set up to 3,600 s, and
@@ -1331,14 +1344,16 @@ raises the body deadline or lowers the lease could let it lapse; a duplicate req
 again, and both uploads would reach the relay, although only one commit succeeds (the other is
 `Lost` → 502). Operator misconfiguration only.
 
-**Remediation / evidence:** Require `REDEMPTION_LEASE_TTL_SECS > UPSTREAM_TIMEOUT_SECS +
-BODY_READ_TIMEOUT_SECS` in `from_lookup` and add a config test. Accepted while undeployed.
+**Remediation / evidence:** Fixed in 0.0.22. `from_lookup` requires `REDEMPTION_LEASE_TTL_SECS > UPSTREAM_TIMEOUT_SECS +
+BODY_READ_TIMEOUT_SECS` (the lease is taken before the body is read and held until the upstream answers).
+The defaults hold (900 > 600 + 30). Pinned by `single_use_needs_a_durable_store_and_consistent_windows`
+(upstream 600 + body 400 refused against the default 900; 500 + 399 accepted; 500 + 400 refused at the edge).
+README and the module docs state the rule.
 
 ### F47 — Test gaps against the RUST and PROXY lens coverage requirements
 
-**Severity:** Info   **Disposition:** ACCEPTED-RISK (undeployed; close before deployment, Section D pre-testnet; S1, S3)
-**Where:** `src/**` tests (93 tests, 2 ignored).
-
+**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Where:** `src/router_tests.rs`, `src/testkit.rs`, `src/main.rs` tests, `src/sui_rpc.rs` tests (117 tests, 3 ignored, in 0.0.22).
 **Issue:** Present: store-level lease, commit, release and expiry; header policy and path unit tests;
 router tests for CORS, public methods, the pre-auth limit and a stalled head; config validation; the
 shared vectors. Missing (PROXY lens §C, RUST lens §C):
@@ -1357,10 +1372,21 @@ shared vectors. Missing (PROXY lens §C, RUST lens §C):
 **Impact:** A regression in these paths would pass CI. Most are covered by construction or by unit
 tests of the pieces.
 
-**Remediation / evidence:** Add the tests with a fake chain and a recording upstream (hyper test
-server), and a Redis service container job. Accepted while undeployed. The Workers audit's parity table
-(B.SC-3) records "unit tests in both" for several rows; for the rows above that is true only of the
-store and header pieces.
+**Remediation / evidence:** Fixed in 0.0.22 with `src/router_tests.rs` (the whole `build_router` stack, real signed proofs, a scripted
+local Sui node and a recording upstream, `src/testkit.rs`): `a_spent_or_in_flight_consume_is_a_coded_409`
+(`redeemed`, `leased`), `a_failed_upload_releases_the_consume_for_a_retry`,
+`a_lease_lost_before_the_commit_is_a_502_not_a_success`, `a_broken_state_store_is_a_503_never_a_conflict`
+(a RESP stub that fails every command but `GETDEL`: challenge and redemption lease), the 403/502
+chain mapping in `a_failed_or_unreadable_consume_never_reaches_the_upstream`,
+`the_upstream_sees_the_request_but_no_credential_and_its_cors_grants_are_dropped` (an upstream
+`ACAO: *`), `an_upstream_redirect_is_refused_and_never_followed` (the redirect target receives nothing),
+`unsafe_paths_and_oversize_or_stalled_bodies_are_refused_before_the_upstream` (400, declared and chunked 413,
+408) and `a_stalled_upstream_is_a_504_at_its_deadline`; in `main.rs`,
+`the_connection_cap_holds_extra_clients_until_a_slot_frees` and `shutdown_gives_in_flight_requests_a_bounded_grace`;
+in `sui_rpc.rs`, the retry loop (`only_not_found_is_retried_and_ends_as_denied`). CI now runs the Redis
+round trip against a service container (S2) and prints a coverage figure (F28). The 405 method list on a gated
+path was already pinned. Not done: shared `headerExtraction` / `redemptionConflict` vectors, which belong to
+`@meddleware/nft-gate-client` (S1).
 
 ### F48 — Positive: audience-bound proofs, owner-bound redemption and strict configuration
 
@@ -1386,9 +1412,9 @@ store and header pieces.
 | I2 | A nonce is consumed exactly once, before any chain call | `verify.rs:326` (`take_if_valid`); `challenge.rs` (in-memory flag / Redis `GETDEL`) | `nonce_valid_once_then_used`, `denies_replayed_nonce`, `expired_nonce_rejected` | HOLDS |
 | I3 | Signatures verified as Sui accepts them; 0x03/0x05/0x06 fail closed | `verify.rs:88-202` | `conformance_shared_vectors` (incl. negatives + ZIP-215), `multisig_and_zklogin_flags_fail_closed` | HOLDS |
 | I4 | The address is normalised before every comparison | `verify.rs::normalize_address`; `sui_rpc.rs::same_address` | vectors `addressNormalization`; `compares_types_and_ids_in_normalised_form` | HOLDS |
-| I5 | Consume binding: exact `<pkg>::access_gate::AccessConsumedEvent`, sender == signer, `gate_id` == `GATE_ID`, age ≤ `CONSUME_MAX_AGE_SECS`, tx succeeded | `sui_rpc.rs::response_has_consume`, `event_is_recent` | `matches_a_valid_consume_for_sender_and_gate`, `rejects_a_look_alike_package_consume_event`, `rejects_wrong_sender_gate_or_event_type`, `a_consume_older_than_the_bound_is_refused` | HOLDS (code-only for success: inferred from events, accepted — F21) |
-| I6 | Single use: a consume digest redeems exactly once; committed never cleared; interrupted upload releases; owner-bound | `main.rs::redeem_and_forward`; `challenge.rs` lease/commit/release | `redemption_*` and `a_stale_holder_…`, `a_commit_after_the_lease_lapsed_is_lost` store tests; no dispatcher-level test (F47) | HOLDS (code-only for the dispatcher) — F2, F3 |
-| I7 | Ownership mode admits only a usable pass for the gate | `sui_rpc.rs::pass_is_usable`, `response_has_owned`, `owns_nft_live` | `only_usable_passes_count`, `an_exhausted_receipt_is_not_ownership`, `owned_response_matches_gate` | GAP — only the first page of 50 is read (F17, accepted); usable-only is F7 (HOLDS) |
+| I5 | Consume binding: exact `<pkg>::access_gate::AccessConsumedEvent`, sender == signer, `gate_id` == `GATE_ID`, age ≤ `CONSUME_MAX_AGE_SECS`, tx succeeded | `sui_rpc.rs::response_has_consume`, `event_is_recent` | `matches_a_valid_consume_for_sender_and_gate`, `rejects_a_look_alike_package_consume_event`, `rejects_wrong_sender_gate_or_event_type`, `a_consume_older_than_the_bound_is_refused` | HOLDS (success from the effects status, F21; `only_a_successful_transaction_can_be_a_consume`, router 403) |
+| I6 | Single use: a consume digest redeems exactly once; committed never cleared; interrupted upload releases; owner-bound | `main.rs::redeem_and_forward`; `challenge.rs` lease/commit/release | `redemption_*` and `a_stale_holder_…`, `a_commit_after_the_lease_lapsed_is_lost` store tests; router tests `a_spent_or_in_flight_consume_is_a_coded_409`, `a_failed_upload_releases_the_consume_for_a_retry`, `a_lease_lost_before_the_commit_is_a_502_not_a_success` (F47) | HOLDS — F2, F3 |
+| I7 | Ownership mode admits only a usable pass for the gate | `sui_rpc.rs::pass_is_usable`, `response_has_owned`, `owns_nft_live` | `only_usable_passes_count`, `an_exhausted_receipt_is_not_ownership`, `owned_response_matches_gate`, `ownership_is_read_across_pages_until_a_usable_pass`, `an_endless_list_is_an_error_after_the_page_bound` | HOLDS — every page up to 100, error past it (F17); usable-only is F7 |
 | I8 | A paused gate with `pause_blocks_access` admits no one; unrecognised gate JSON denies | `verify.rs:334-342`; `sui_rpc.rs::gate_blocks_access` | `denies_owner_while_gate_paused_with_access_policy`, `single_use_paused_gate_denies_before_redemption`, `unrecognised_gate_json_is_an_error_not_unpaused` | HOLDS (F15) |
 | I9 | Body cap: declared length rejected before reading; read bounded by the cap and a deadline | `proxy.rs::forward`, `declared_too_large` | `declared_length_over_cap_is_rejected_up_front` (chunked path and the 408 untested) | HOLDS (code-only for chunked and the deadline) |
 | I10 | Memory bounded by concurrency × caps | `main.rs::build_router` (`load_shed` + `concurrency_limit`) | `router_serves_healthz_and_routes_through_the_concurrency_layer` | HOLDS (code-only) — sizing F6, F32 |
@@ -1399,21 +1425,21 @@ store and header pieces.
 | I14 | Pre-auth limits keyed on a trusted client address (IPv6 by /64); gated limited before verification | `main.rs::client_ip`, `rate_key`, `handle` | `client_ip_*`, `ipv6_clients_are_keyed_by_their_slash_64`, `gated_requests_are_rate_limited_per_ip_before_verification` | HOLDS (F9; limiter map not swept, F10) |
 | I15 | Inbound `Authorization`/`X-Access-Proof`/`cf-access-*` stripped; injected headers replace client ones | `headers.rs::upstream_request_headers`; `http_client.rs::insert_auth` | `request_strips_hop_by_hop_connection_named_credentials_and_spoofable_fields`, `upstream_auth_headers_are_json_only` | HOLDS |
 | I16 | Hop-by-hop (and `Connection`-named) fields stripped both directions; cookies stripped from responses (`SECURITY.md` inv. 6) | `headers.rs` | `request_strips_…`, `response_strips_hop_by_hop_cookies_and_upstream_cors` | HOLDS (F13) |
-| I17 | CORS: exact allowlist only, `Vary: Origin`, preflight before auth, on errors; upstream CORS never survives | `main.rs::cors`, `headers.rs` | three `cors_*` tests; `response_strips_…` (no router-level upstream-ACAO test, F47) | HOLDS (F12) |
-| I18 | No secrets in logs or `Debug` | `config.rs` redacting `Debug`; `main.rs` | `debug_redacts_credentials` | GAP — `UPSTREAM_URL` is logged (F26, accepted); credentials are redacted |
+| I17 | CORS: exact allowlist only, `Vary: Origin`, preflight before auth, on errors; upstream CORS never survives | `main.rs::cors`, `headers.rs` | three `cors_*` tests; `response_strips_…`; router test `the_upstream_sees_the_request_but_no_credential_and_its_cors_grants_are_dropped` | HOLDS (F12) |
+| I18 | No secrets in logs or `Debug` | `config.rs` redacting `Debug`; `main.rs` | `debug_redacts_credentials`, `urls_must_not_carry_credentials` | HOLDS — the upstream and RPC URLs are never logged or printed (F26) |
 | I19 | No `unsafe`; no panic on attacker input | `main.rs:2`; release profile | proptests; `rejects_an_oversized_token_before_decoding`, `rejects_everything_outside_the_field_grammar` | HOLDS |
-| I20 | SIGTERM handled; drain bounded | `main.rs::shutdown_signal`, `serve` (`SHUTDOWN_GRACE_SECS`) | — (bound untested, F47) | HOLDS (code-only) — F19 |
+| I20 | SIGTERM handled; drain bounded | `main.rs::shutdown_signal`, `serve` (`SHUTDOWN_GRACE_SECS`) `shutdown_gives_in_flight_requests_a_bounded_grace` | HOLDS — F19 |
 | I21 | Misconfiguration fails at startup | `config.rs::from_lookup` | `validation_tests::*` | HOLDS (F8) |
-| I22 | Wire parity with `gateway-workers` | `conformance/vectors.json` (nft-gate-client) | `conformance_shared_vectors` | HOLDS for vector-covered fields; GAP for pagination (F17) and the effects-status check (F21) |
+| I22 | Wire parity with `gateway-workers` | `conformance/vectors.json` (nft-gate-client) | `conformance_shared_vectors` | HOLDS (vector-covered fields; pagination and the effects-status check now match, F17, F21) |
 | I23 | The proof is bound to the intended audience | `proof.rs::personal_message`; `verify.rs` (rebuilt from `cfg`) | `refuses_a_proof_made_for_another_gateway_gate_or_network`, vectors `audienceMismatch` | HOLDS (F1) |
 | I24 | Single-use redemption state survives restarts and replicas | `config.rs` (Redis required, or `ALLOW_VOLATILE_REDEMPTIONS`) | `single_use_needs_a_durable_store_and_consistent_windows` | HOLDS (F4) |
-| I25 | Only listed methods and safe paths are forwarded; public paths are `GET`/`HEAD` | `main.rs::handle`, `proxy.rs::FORWARDED_METHODS`, `headers.rs::is_safe_path` | `public_paths_are_read_only_and_gated_methods_are_listed`, `unsafe_paths_are_refused` | HOLDS (F42; no router-level `400`, F47) |
+| I25 | Only listed methods and safe paths are forwarded; public paths are `GET`/`HEAD` | `main.rs::handle`, `proxy.rs::FORWARDED_METHODS`, `headers.rs::is_safe_path` | `public_paths_are_read_only_and_gated_methods_are_listed`, `unsafe_paths_are_refused`, router `unsafe_paths_and_oversize_or_stalled_bodies_are_refused_before_the_upstream` | HOLDS (F42) |
 | I26 | A request that has already passed through the gateway is refused | `config.rs` (literal self-origin only) | `audience_binding_inputs_are_required_and_canonical` | HOLDS (code-only) for the literal case; no `Via` marker — F43 |
 | I27 | Upstream reachable only via the gateway (origin lock), verified negatively | the operator's upstream (outside this repo) | — | GAP — see F32 (deployment, OQ9) |
-| I28 | Upstream redirects are not followed; a 3xx is `502` | `proxy.rs::forward`; hyper client | — (no redirect test, F47) | HOLDS (code-only) |
-| I29 | Upstream and store failures map to fixed `502`/`503`/`504`; a store outage is never a conflict | `proxy.rs`, `main.rs::redeem_and_forward` | `unframe_*` (RPC side); no router-level test (F47) | HOLDS (code-only) — F2, F44 |
-| I30 | The redemption lease outlives the longest request (checked at startup) | `config.rs` (lease > `UPSTREAM_TIMEOUT_SECS`) | `single_use_needs_a_durable_store_and_consistent_windows` | GAP — the body-read time is not added (F46, accepted) |
-| I31 | The hand-rolled gRPC field numbers still match a real fullnode | `sui_rpc.rs` constants | `live_consume_tx_valid` (env-gated) | GAP — the test fails today: its fixed transaction was pruned (F45) |
+| I28 | Upstream redirects are not followed; a 3xx is `502` | `proxy.rs::forward`; hyper client `an_upstream_redirect_is_refused_and_never_followed` | HOLDS |
+| I29 | Upstream and store failures map to fixed `502`/`503`/`504`; a store outage is never a conflict | `proxy.rs`, `main.rs::redeem_and_forward` | `unframe_*` (RPC side); router tests for `409`, `503`, `502`, `504`, `403` (F47) | HOLDS — F2, F44 |
+| I30 | The redemption lease outlives the longest request (checked at startup) | `config.rs` (lease > `UPSTREAM_TIMEOUT_SECS` + `BODY_READ_TIMEOUT_SECS`) | `single_use_needs_a_durable_store_and_consistent_windows` | HOLDS (F46) |
+| I31 | The hand-rolled gRPC field numbers still match a real fullnode | `sui_rpc.rs` constants | hermetic literal-field-number fixtures (CI); `live_*` (`--ignored`, fresh consume from `NFT_GATE_LIVE_*`) | HOLDS (F45) |
 
 ---
 
@@ -1428,7 +1454,7 @@ store and header pieces.
 - crates.io-only sources.
 
 `cargo-deny-action` runs in CI and was green on `main` (Rust CI of 2026-10-09T17:52Z, `85b18e1`).
-`cargo audit` is not run (F28); the RUST lens (2026-10-08) names both. There is no local cargo-deny or
+`cargo audit` is not run as a second tool: the `advisories` check reads the same RustSec database (F28); the RUST lens (2026-10-08) names both. There is no local cargo-deny or
 cargo-audit binary in the review environment and GitHub Dependabot security alerts are disabled for the
 repository, so the CVE status is as reported by the last CI run, not re-measured here. Dependabot
 version updates are configured and were triaged on 2026-10-09 (Scope).
@@ -1449,9 +1475,9 @@ version updates are configured and were triaged on 2026-10-09 (Scope).
 | Sui fullnode (`SUI_RPC_URL`) | operator-chosen; public `fullnode.<net>.sui.io:443` | every gated request — fails **closed** (502) | n/a | gRPC-web; `SUI_RPC_AUTH_HEADER` optional; prunes old transactions (F45) |
 | Redis / Dragonfly | operator-run | challenge + gated (when set) — fails **closed** (503) | n/a | required for `SINGLE_USE` |
 | Upstream (relay) | operator-run | gated + public paths — 502/504 | n/a | origin lock not verifiable here (F32) |
-| Base images | `rust:1-slim@sha256:4cd8…`; `distroless/cc-debian13:nonroot@sha256:e792…` (main) | build/runtime | **no image scan** (F29) | Dependabot docker group |
+| Base images | `rust:1-slim@sha256:4cd8…`; `distroless/cc-debian13:nonroot@sha256:e792…` (main) | build/runtime | Trivy image scan before signing (0.0.22, F29) | Dependabot docker group |
 | `cargo-chef` | 0.1.78 `--locked` | build | — | |
-| Image scanner | Trivy `v0.74.0`, `scan-type: config` on the Dockerfile only | CI | config scan clean | no `trivy image` (F29) |
+| Image scanner | Trivy `v0.74.0`: `config` on the Dockerfile (CI) and `image` on the merged digest before signing (publish) | CI, publish | config scan clean; image scan runs from the next tag | F29 |
 
 **Sui client lens rows:**
 
@@ -1488,13 +1514,13 @@ On-chain capabilities: none (the gateway holds no `AdminCap` and signs nothing).
 
 | Item | Holds? | Evidence |
 | --- | --- | --- |
-| Actions pinned | Yes | every `uses:` is a 40-char SHA (Dependabot's github-actions group keeps them current); `dtolnay/rust-toolchain` is pinned to a `master` commit (F28) |
+| Actions pinned | Yes | every `uses:` is a 40-char SHA (Dependabot's github-actions group keeps them current); the toolchain comes from `rustup` on the runner, so no unpinnable `dtolnay/rust-toolchain` remains (F28) |
 | Least privilege | Yes | top-level `contents: read`; `id-token: write` only on crates publish and image sign/attest jobs; `attestations: write` only in the merge job |
 | OIDC trusted publishing | Partly | crates.io OIDC; registry pushes use tokens with no inventory (F30) |
 | Tag-gated, idempotent publish | Yes | `on: push: tags: v*`; crates publish skips an existing version; `check-versions.sh` enforces tag == crate == npm |
 | Release gate equals CI | Yes | `docker-publish.yml` and `crates-publish.yml` run `rust-ci.yml` as a `verify` job (`workflow_call`) |
 | Automated dependency updates | Yes | `.github/dependabot.yml` covers cargo and docker (`/gateway-rust`), npm and github-actions; weekly, grouped; triaged 2026-10-09 |
-| Container images | Partly | per IMG lens: signed, SBOM and provenance on public registries; no image scan, no published verification command, unsigned private mirror (F29) |
+| Container images | Partly | per IMG lens: signed, SBOM and provenance on public registries; image scanned before signing and a published verification command (0.0.22); the private mirror stays unsigned (F29, OQ8) |
 | Secrets never echoed | Yes | no `set -x`; secrets passed via `with:`/`env:` only |
 | Real funds are manual | N/A | no job spends funds or signs on-chain |
 | Test-only modes | N/A | no test-only build mode in the Rust binary (`#[cfg(test)]` only) |
@@ -1504,10 +1530,10 @@ On-chain capabilities: none (the gateway holds no `AdminCap` and signs nothing).
 | Requirement | Holds? | Evidence |
 | --- | --- | --- |
 | `cargo fmt --check` in CI | Yes | `rust-ci.yml` |
-| `cargo clippy --all-targets -- -D warnings` in CI | Yes (without `--locked`, F28) | `rust-ci.yml` |
-| `cargo audit` and `cargo deny` in CI | Partly — deny only | F28 |
+| `cargo clippy --all-targets --locked -- -D warnings` in CI | Yes | `rust-ci.yml` |
+| `cargo audit` and `cargo deny` in CI | Yes — deny, whose advisories check uses the RustSec database `cargo audit` reads (F28); coverage figure in the job summary | `rust-ci.yml` |
 | MSRV job checks `rust-version` | Yes | `msrv` job, toolchain 1.88, `cargo check --locked` |
-| Image per IMG lens | Partly | B.IMG-1, F29 |
+| Image per IMG lens | Mostly | B.IMG-1, F29 (private mirror, licence notices) |
 | Crates via trusted publishing, no `--allow-dirty` | Yes | `crates-publish.yml` (`cargo publish --locked`) |
 
 ### B.IMG-1 Publish & attestation
@@ -1515,19 +1541,19 @@ On-chain capabilities: none (the gateway holds no `AdminCap` and signs nothing).
 | Requirement | Holds? | Evidence |
 | --- | --- | --- |
 | Keyless cosign signature at the index digest | Yes (public registries) | `docker-publish.yml` "Sign images (keyless)"; not re-verified here |
-| SBOM as a signed attestation | Yes (content unverified) | `anchore/sbom-action` SPDX → `cosign attest --type spdxjson`; likely base layers only (F29) |
+| SBOM as a signed attestation | Yes (content to verify on the next tag) | `anchore/sbom-action` SPDX → `cosign attest --type spdxjson`; the image now carries `Cargo.lock`, so the crates are listed (F29) |
 | Build provenance | Yes | `actions/attest-build-provenance` ×2, `push-to-registry: true` |
 | No `continue-on-error` on these steps | Yes | the merge job has none; only the private-mirror jobs carry it |
 | Best-effort mirrors listed | Yes (here) | self-hosted registry, unsigned (F29) |
-| Scan before sign (`trivy image`) | **No** | Trivy config only (F29) |
-| Published `cosign verify` command pinning the workflow identity | **No** | none in README or `SECURITY.md` (F29) |
+| Scan before sign (`trivy image`) | Yes (0.0.22; first exercised by the next tag) | `docker-publish.yml` "Scan the published image (Trivy)" precedes "Sign images" |
+| Published `cosign verify` command pinning the workflow identity | Yes (0.0.22) | `gateway-rust/README.md` "Verify a published image" |
 
 ### B.SC-1 ID-constant trace
 
 | Location | Network | Value | original-id / published-at | Matches latest on-chain (evidence) |
 | --- | --- | --- | --- | --- |
-| `gateway-rust/src/sui_rpc.rs:674` (live test) | testnet | `0xa55789d77b8ae41e604c1c2e9ad9f7b034ca69b028ad0f1eee7d7cc8ad886d41` | original-id (= published-at, v1) | **Deliberately superseded**: the 2026-10-09 publication is `0xd7ddaa94…388c9` (`access-gate-sui/Published.toml`); `0xa55789…` is immutable (upgrade cap burned), so the fixed historic consume it names stays valid chain history. The test fails today for pruning, not for the id (F45) |
-| `gateway-rust/src/sui_rpc.rs:678` (live test) | testnet | gate `0xfd6c3b2a2baefcd8c3e08a2cddac942478e0527c421f4dc739917b01560ab8a6` | object | Same: the superseded relay gate; the current one is `0x316f1bf9…faddc` (Workers audit, read live 2026-10-09) |
+| `gateway-rust/src/sui_rpc.rs` (live test defaults) | testnet | `0xd7ddaa94b74330979b2b618fc81206d160a264f1c9ca148a77fa2144301388c9` | original-id | Matches the 2026-10-09 publication (`access-gate-sui/Published.toml`, `gateway-workers/wrangler.toml`). As of 0.0.22 the superseded `0xa55789…` package and its fixed consume are no longer in the source; the live defaults name the current package and are overridable (`NFT_GATE_LIVE_PACKAGE`) (F45) |
+| `gateway-rust/src/sui_rpc.rs` (live test default gate) | testnet | gate `0x316f1bf9764db352e925bb598aff44ea77be4ab652f0bd2eb3fdcc0a378faddc` | object | The current relay gate (`gateway-workers/wrangler.toml`; read live by the passing `live_gate_and_ownership_requests_are_accepted`, 2026-10-10) |
 | Operator env `NFT_TYPE` / `GATE_ID` / `GATEWAY_ORIGIN` / `NETWORK` | any | not in repo | original-id | not verifiable — no deployment |
 
 The gateway uses the package id only as a **type prefix** (original-id), never as a call target, so the
@@ -1553,9 +1579,9 @@ is not duplicated here. Rows where this crate differs from, or the home table mi
 
 | Behaviour | Divergence | Tracked |
 | --- | --- | --- |
-| Owned-object pagination | Rust reads one page of 50; Workers reads every page (the home table says "per its audit": this is it) | F17 |
-| Consume success check | Rust infers success from the event; Workers checks `status.success`. The home table's "success check (0.0.19)" for Rust is not what the code does | F21 |
-| Redemption conflict / store error | same vocabulary and statuses (`409` with `code`, `503`); the home table's "unit tests in both" holds for the store only: no dispatcher-level test here | F2, F47 |
+| Owned-object pagination | same since 0.0.22: both read every page, bounded at 100 pages (Rust: `scan_owned`; Workers: `MAX_OWNED_PAGES`); an overlong list is a chain error in both | F17 |
+| Consume success check | same since 0.0.22: both require the effects status to be success (Rust: `effects_succeeded`; Workers: `status.success`) | F21 |
+| Redemption conflict / store error | same vocabulary and statuses (`409` with `code`, `503`); dispatcher-level tests exist here since 0.0.22 (`router_tests.rs`) | F2, F47 |
 | Public-path limit and cache | Rust: shares `ip_limiter` (`CHALLENGE_RATE_LIMIT_PER_MIN`, 30) with `/v1/challenge`, no cache; Workers: own `PUBLIC_RATE_LIMIT_PER_MIN` (120) + edge cache | Suggestion S9 |
 | Body handling | Rust buffered (small-body scope); Workers streamed | F6 |
 | Redemption backend | Rust: Redis (required for `SINGLE_USE`) or in-memory for development; Workers: Durable Object | F4 |
@@ -1581,21 +1607,21 @@ redirects, timeouts) match this crate's code.
 
 | Limit | Value | Where enforced | Test |
 | --- | --- | --- | --- |
-| header-read timeout · body-read deadline · idle timeout | 10 s (`HEADER_READ_TIMEOUT_SECS`, also bounds keep-alive idle) · 30 s (`BODY_READ_TIMEOUT_SECS`, `408`) · the header timeout | `main.rs::serve`; `proxy.rs::forward` | `the_server_drops_a_client_that_never_finishes_its_headers`; body deadline untested (F47) |
-| request body cap (declared / streamed) | 262,144 B (`MAX_BODY_BYTES`); declared → `413` before reading; read capped at the same size (buffered) | `proxy.rs::forward` | `declared_length_over_cap_is_rejected_up_front`; chunked untested |
-| concurrent connections / in-flight forwards | 1,024 connections (`MAX_CONNECTIONS`); 64 in-flight requests (`MAX_CONCURRENT_REQUESTS`, `503 gateway overloaded`); memory ≈ 64 × (2 × body cap + 16 MiB) ≈ 1.03 GiB | `main.rs::serve`, `build_router` | `router_serves_healthz_and_routes_through_the_concurrency_layer`; cap untested |
-| upstream connect · response · total deadline | 10 s connect · (headers and body together) · 600 s total (`UPSTREAM_TIMEOUT_SECS`, 1–3600, `504`) | `http_client.rs::send` | none (F47) |
+| header-read timeout · body-read deadline · idle timeout | 10 s (`HEADER_READ_TIMEOUT_SECS`, also bounds keep-alive idle) · 30 s (`BODY_READ_TIMEOUT_SECS`, `408`) · the header timeout | `main.rs::serve`; `proxy.rs::forward` | `the_server_drops_a_client_that_never_finishes_its_headers`; router test for the `408` body deadline (F47) |
+| request body cap (declared / streamed) | 262,144 B (`MAX_BODY_BYTES`); declared → `413` before reading; read capped at the same size (buffered) | `proxy.rs::forward` | `declared_length_over_cap_is_rejected_up_front`; router tests for declared and chunked `413` |
+| concurrent connections / in-flight forwards | 1,024 connections (`MAX_CONNECTIONS`); 64 in-flight requests (`MAX_CONCURRENT_REQUESTS`, `503 gateway overloaded`); memory ≈ 64 × (2 × body cap + 16 MiB) ≈ 1.03 GiB | `main.rs::serve`, `build_router` | `router_serves_healthz_and_routes_through_the_concurrency_layer`, `the_connection_cap_holds_extra_clients_until_a_slot_frees` |
+| upstream connect · response · total deadline | 10 s connect · (headers and body together) · 600 s total (`UPSTREAM_TIMEOUT_SECS`, 1–3600, `504`) | `http_client.rs::send` | `a_stalled_upstream_is_a_504_at_its_deadline` |
 | Sui RPC per call | 15 s (`RPC_TIMEOUT_SECS`, 1–120); response cap 4 MiB | `grpc.rs`, `http_client.rs` | `unframe_*` |
-| admission-state lifetime (must exceed the total deadline) | lease 900 s > 600 s upstream (startup-checked; the 30 s body read is not added, F46); retention 30 d ≥ consume age 5 d (startup-checked) | `config.rs` | `single_use_needs_a_durable_store_and_consistent_windows` |
+| admission-state lifetime (must exceed the total deadline) | lease 900 s > 600 s upstream + 30 s body read (startup-checked, F46); retention 30 d ≥ consume age 5 d (startup-checked) | `config.rs` | `single_use_needs_a_durable_store_and_consistent_windows` |
 | rate limits | challenge and public 30/min/IP; gated pre-auth 120/min/IP; per address 30/min | `main.rs`, `ratelimit.rs` | `gated_requests_are_rate_limited_per_ip_before_verification` |
-| graceful shutdown | 30 s (`SHUTDOWN_GRACE_SECS`) then connections are aborted | `main.rs::serve` | untested bound |
+| graceful shutdown | 30 s (`SHUTDOWN_GRACE_SECS`) then connections are aborted | `main.rs::serve` | `shutdown_gives_in_flight_requests_a_bounded_grace` |
 
 ### B.WAL-1 Coupling
 
 | Format | Producer | Consumer | Test / vector |
 | --- | --- | --- | --- |
 | Access proof header for a gated relay | `@meddleware/nft-gate-client` (via walrus-client `uploadRelayAuthToken`) | this gateway | `conformance/vectors.json` (B.SC-3); paywall e2e PASS 2026-10-09 through the Workers gateway (not this one) |
-| Redemption conflict (409 `code`) | gateway | walrus-client resume logic (`isRedeemedConflict`, `isLeasedConflict`) | gateway side: store tests only, no router test (F47); vocabulary exported as `GATEWAY_CONFLICT_CODES` by nft-gate-client (TypeScript) |
+| Redemption conflict (409 `code`) | gateway | walrus-client resume logic (`isRedeemedConflict`, `isLeasedConflict`) | gateway side: store tests and router tests (F47); vocabulary exported as `GATEWAY_CONFLICT_CODES` by nft-gate-client (TypeScript) |
 
 B.WAL-2 (economics) is the relay's and walrus-ui's; the gateway's contribution is single-use
 enforcement (I6).
@@ -1629,16 +1655,19 @@ enforcement (I6).
 
 ### C.1 Coverage grade
 
-`cargo test --locked --offline` gives **93 tests: 91 passed, 2 ignored** (2026-10-09, `367e673`; first
-pass 71 / 69 / 2). There is no coverage tool, so no line-coverage figure (F28). Test pools: unit and
-router tests in the one binary crate; the 2 ignored tests are env-gated (`live_consume_tx_valid`, needs
-testnet, **currently failing**, F45; `redis_backend_round_trip`, needs `REDIS_URL`).
+`cargo test --locked` gives **117 tests: 114 passed, 0 failed, 3 ignored** (2026-10-10, 0.0.22; 93 / 2 ignored on
+2026-10-09, 71 / 2 in the first pass). Line coverage: 90.7 % (91.4 % of functions; test code included) (`cargo llvm-cov --locked --summary-only`,
+run locally; CI prints it in the job summary, F28). Test pools: unit tests, hermetic gRPC-web fixtures
+(`sui_rpc.rs`, a scripted local node) and router tests (`router_tests.rs`) in the one binary crate; the 3
+ignored tests are env-gated (`live_gate_and_ownership_requests_are_accepted`, `live_consume_tx_valid`, both
+passing against testnet on 2026-10-10, F45; `redis_backend_round_trip`, needs `REDIS_URL`, run in CI against
+a Redis service container).
 
 | Dimension | Assessment |
 | --- | --- |
 | Happy-path coverage | covered: proof decode, every signature scheme, ownership allow, single-use allow, challenge round trip, CORS, public-path methods |
-| Error-path / failure-mode coverage | covered: bad / tampered / wrong-address signature, replay, expired/unknown nonce, missing consume, non-owner, paused gate, unrecognised gate JSON, missing gate object, gRPC status/truncation/compression, audience mismatch and v1 message, stale-holder lease, lapsed lease at commit, typo'd configuration. **Missing:** dispatcher-level lease/commit/release and the 409/503/502 bodies (F2/F47), upstream timeout (504), redirect (502), Redis outage (ignored test only), chunked over-cap body, stalled body |
-| Boundary / edge-case coverage | covered: token size cap, non-ASCII fields, field grammar, depth limit, nonce hard cap, declared length = cap, consume age window and clock skew, lease/deadline and retention/age config bounds, IPv6 /64 keying. **Missing:** multi-page owned objects (F17), the connection cap and the shutdown bound |
+| Error-path / failure-mode coverage | covered: bad / tampered / wrong-address signature, replay, expired/unknown nonce, missing consume, non-owner, paused gate, unrecognised gate JSON, missing gate object, gRPC status/truncation/compression, audience mismatch and v1 message, stale-holder lease, lapsed lease at commit, typo'd configuration. Dispatcher-level lease/commit/release and the 409/503/502 bodies, upstream timeout (504), redirect (502), chunked over-cap body and stalled body are covered by `router_tests.rs` (F47). **Missing:** a Redis outage against the real client library (the RESP stub covers the mapping) |
+| Boundary / edge-case coverage | covered: token size cap, non-ASCII fields, field grammar, depth limit, nonce hard cap, declared length = cap, consume age window and clock skew, lease/deadline and retention/age config bounds, IPv6 /64 keying. multi-page owned objects (F17), the connection cap and the shutdown bound are covered since 0.0.22. **Missing:** none recorded |
 | Security-relevant coverage | strong: shared vectors with negatives (high-S both curves, non-canonical s, wrong intent, truncated, 0x03/0x05/0x06, audience mismatch per bound field) and ZIP-215; look-alike package event; normalised compare; header-policy unit tests. **Missing:** header-extraction and redemption-conflict vectors (shared with Workers, S1) |
 
 RUST lens §C:
@@ -1646,30 +1675,30 @@ RUST lens §C:
 - `cargo test` covers units, the shared vectors and env-gated live tests: yes.
 - Property tests for every hand-rolled decoder: yes (four proptests in `grpc.rs`). Signature parsing is
   covered by vectors, not proptests.
-- Coverage tool named: **no** (F28).
-- Malformed input does not panic: yes for token, frames and JSON; HTTP-level oversize is tested only
-  for declared length.
+- Coverage tool named: yes — `cargo llvm-cov` (F28), figure 90.7 % of lines.
+- Malformed input does not panic: yes for token, frames and JSON; HTTP-level oversize is tested for
+  declared and chunked bodies.
 
 PROXY lens §C:
 
 | Requirement | Holds? |
 | --- | --- |
-| Hop-by-hop and `Connection`-named fields stripped both ways; inbound credential replaced; upstream CORS stripped | yes (`headers.rs` unit tests); forwarding fields are stripped, not rebuilt; no end-to-end test through a recording upstream |
-| Redirect to a foreign origin is refused and no credential reaches it | by construction (hyper does not follow; 3xx → 502); **no test** (F47) |
-| Unlisted method, unsafe path, public path with `POST` refused | yes (`public_paths_are_read_only_and_gated_methods_are_listed`, `unsafe_paths_are_refused`); the router `400` is untested |
-| Oversize declared, oversize chunked, stalled body, stalled upstream release state | declared yes; chunked, stalled body and stalled upstream untested (F47) |
-| Lease expiry; stale holder; store error is `503` | stale holder and lapsed-at-commit yes (store level); `503` mapping untested at router level (F47) |
+| Hop-by-hop and `Connection`-named fields stripped both ways; inbound credential replaced; upstream CORS stripped | yes (`headers.rs` unit tests and the recording-upstream router test); forwarding fields are stripped, not rebuilt |
+| Redirect to a foreign origin is refused and no credential reaches it | yes (`an_upstream_redirect_is_refused_and_never_followed`: the target receives nothing) |
+| Unlisted method, unsafe path, public path with `POST` refused | yes (`public_paths_are_read_only_and_gated_methods_are_listed`, `unsafe_paths_are_refused`, router `400`) |
+| Oversize declared, oversize chunked, stalled body, stalled upstream release state | yes: declared and chunked `413`, stalled body `408`, stalled upstream `504` (F47) |
+| Lease expiry; stale holder; store error is `503` | stale holder and lapsed-at-commit yes (store level and router); `503` mapping tested at router level (F47) |
 | Shared vectors pass in every implementation | yes |
 
 ### C.2 Hermetic vs. live paths
 
 | Path | Hermetic unit test? | Deferred to | Tracking |
 | --- | --- | --- | --- |
-| gRPC-web against a real fullnode (field numbers) | partial (fixtures) | `live_consume_tx_valid` (`--ignored`, testnet) | **fails 2026-10-10: fixed transaction pruned** (F45); maintainer to refresh |
-| Redis/Dragonfly backend (Lua CAS, `GETDEL`) | no | `redis_backend_round_trip` (`--ignored`, needs `REDIS_URL`) | not in CI — add a Redis service container job (S2) |
+| gRPC-web against a real fullnode (field numbers) | yes (literal-field-number fixtures against a scripted node) | `live_gate_and_ownership_requests_are_accepted`, `live_consume_tx_valid` (`--ignored`, testnet; fresh consume from `NFT_GATE_LIVE_*`) | F45 (both passed 2026-10-10) |
+| Redis/Dragonfly backend (Lua CAS, `GETDEL`) | no | `redis_backend_round_trip` (`--ignored`, needs `REDIS_URL`) | run in CI against a Redis service container (0.0.22, S2) |
 | Upstream origin lock (the upstream refuses direct requests; negative check) | n/a | live deployment only | F32, OQ9 |
 | Pod memory under `MAX_CONCURRENT_REQUESTS × caps` (≈1.03 GiB) | no | staging load test | F6, F32 |
-| Graceful shutdown under load | no | staging | F19, F47 |
+| Graceful shutdown under load | the bound is tested; load is not | staging | F19 |
 | Wallet display of the v2 message | n/a | live wallet | Risks |
 | Paywall end to end through this gateway | no | none — not deployed; the 2026-10-09 e2e ran through the Workers gateway | OQ9 |
 
@@ -1682,41 +1711,38 @@ The gateway is not deployed; "pre-testnet" below is the gate for putting it in f
 
 ### pre-localnet
 
-- [x] builds; `cargo test --locked` green (91 passed, 0 failed, 2 ignored); fmt and clippy `-D warnings`
+- [x] builds; `cargo test --locked` green (114 passed, 0 failed, 3 ignored); fmt and clippy `-D warnings`
   clean — this pass
 - [x] `#![forbid(unsafe_code)]`; no panics on attacker-reachable paths — F35, proptests
-- [x] no secrets in source — the only IDs are public testnet fixtures (superseded, immutable: F45)
+- [x] no secrets in source — the only IDs are the public current testnet package and gate used as optional live-test defaults (F45)
 - [x] dependencies install clean (`--locked`) — `Cargo.lock`
-- [ ] cargo audit + cargo deny green — cargo-deny green in CI; `cargo audit` absent (F28)
+- [x] cargo audit + cargo deny green — cargo-deny green in CI and its `advisories` check reads the RustSec database `cargo audit` uses, so no second tool (F28)
 - [x] every `FROM` digest-pinned; lockfile installs; no secrets in ARG/ENV/COPY/RUN — `Dockerfile`
-- [ ] `.dockerignore` excludes local env files — F29
-- [ ] B.PX-1 and B.PX-2 complete (done below); hop-by-hop, route and path tests green (done); redirect
-  and limit tests green — missing, F47
+- [x] `.dockerignore` excludes local env files — `.env*`, `*.pem`, `*.key`, `docs/` (0.0.22, F29)
+- [x] B.PX-1 and B.PX-2 complete (done below); hop-by-hop, route and path tests green (done); redirect
+  and limit tests green — `router_tests.rs` (0.0.22, F47)
 - [x] configuration fails startup on invalid values — F8
 
 ### pre-testnet
 
 - [x] timeouts on every outbound call; response bodies bounded — F38
-- [x] inbound header/body timeouts and a connection cap — F5 (body deadline and cap untested, F47)
+- [x] inbound header/body timeouts and a connection cap — F5 (router tests for the body deadline and cap, `the_connection_cap_holds_extra_clients_until_a_slot_frees`, F47)
 - [x] low-S and ed25519 rules match the Sui client lens; parity vectors (incl. negatives) green — F36
-- [ ] parity complete across implementations — 409 code, Bearer parsing, status checks done (F2, F16);
-  pagination F17 and the effects-status check F21 open (accepted while undeployed)
+- [x] parity complete across implementations — 409 code, Bearer parsing, status checks (F2, F16);
+  pagination (F17) and the effects-status check (F21) in 0.0.22
 - [x] rate limit keyed on a trusted address; SIGTERM handled and drained within a bound — I14, I20 (F19)
 - [x] single-use redemption safe across restarts and replicas — F4
-- [x] redemption lease owner-bound and longer than the upstream deadline — F3 (body-read time not
-  added: F46, open)
-- [x] consumed IDs: none in production code; the live-test fixtures are deliberately the superseded,
-  immutable ids — B.SC-1
-- [ ] ABI-drift test green (`live_consume_tx_valid`) — fails, fixture pruned (F45)
+- [x] redemption lease owner-bound and longer than the body-read and upstream deadlines — F3, F46
+- [x] consumed IDs: none in production code; the live-test defaults name the current package and gate — B.SC-1
+- [x] ABI-drift test green — hermetic wire-format fixtures in CI; the optional live checks passed against testnet on 2026-10-10 (F45)
 - [ ] non-root pod security context, probes and limits; deployment by digest — F32 (manifests absent)
 - [x] `SECURITY.md` present — root `SECURITY.md`; invariants 4–7 describe the current behaviour
-- [x] lockfile committed; SBOM and cosign on images; CI gates green — B.IMG-1, B.2 (SBOM content and
-  verification command: F29)
+- [x] lockfile committed; SBOM and cosign on images; CI gates green — B.IMG-1, B.2 (verification command published; SBOM content to confirm on the next tag: F29)
 - [ ] B.AUTH-1 credential inventory complete — F31 (deployment)
-- [ ] dispatcher-level admission-state tests (expiry, stale holder, store outage) and redirect/limit
-  tests — F47
+- [x] dispatcher-level admission-state tests (expiry, stale holder, store outage) and redirect/limit
+  tests — `router_tests.rs` (F47)
 - [ ] the negative origin-lock check — F32 (deployment)
-- [ ] pre-deployment closure of the accepted gaps F17, F21, F26, F46 — accepted while undeployed, OQ9
+- [x] pre-deployment closure of the accepted gaps F17, F21, F26, F46 — fixed in 0.0.22
 
 ### pre-mainnet
 
@@ -1725,7 +1751,7 @@ The gateway is not deployed; "pre-testnet" below is the gate for putting it in f
 - [x] decoders fuzzed / property-tested; maximum message size enforced — F37
 - [x] concurrency limit sized against memory for the configured body cap — F6 (decided: small-body
   scope; 256 KiB cap ⇒ ≈1.03 GiB, to be set in the manifest)
-- [ ] image signature, SBOM and provenance on every pushed image and a clean image scan — F29 (OQ8)
+- [ ] image signature, SBOM and provenance on every pushed image and a clean image scan — public images scanned before signing from 0.0.22 (to be seen on the next tag); the private mirror is unsigned (F29, OQ8)
 - [x] crates.io trusted publishing — `crates-publish.yml`
 - [ ] mainnet `NFT_TYPE`/`GATE_ID`/`NETWORK`/`GATEWAY_ORIGIN` from the canonical record; empty IDs fail
   closed — startup requires all of them (holds); a mainnet `access_gate` is not yet published
@@ -1744,7 +1770,7 @@ The gateway is not deployed; "pre-testnet" below is the gate for putting it in f
   - `Cargo.lock` is committed, and actions and base images are pinned by SHA/digest; Dependabot (weekly,
     grouped) keeps them current and was triaged on 2026-10-09 (`k256`/`p256` 0.14, TypeScript 7,
     vitest 5 declined; `blake2` 0.11 and `ed25519-dalek` 3 merged).
-  - cargo-deny runs in CI; `cargo audit` and an image scan do not (F28, F29).
+  - cargo-deny (advisories, licences, sources) and a coverage figure run in CI, and the published image is scanned with Trivy before it is signed (F28, F29).
   - crates.io uses OIDC; image registries use tokens without an inventory (F30, maintainer item).
   - The release job runs the same workflow as CI.
 - **Wire-format coupling & conformance vectors:**
@@ -1760,19 +1786,17 @@ The gateway is not deployed; "pre-testnet" below is the gate for putting it in f
   age-bounded. That is gateway-local state, not financial truth: commission and payment remain
   on-chain in `access_gate`.
 - **Deployment readiness:** Section D. The crate and image are published (0.0.21), but there is no
-  deployment, by decision. The pre-deployment gates are listed in Section D (F17, F21, F26, F28, F29,
-  F31, F32, F45–F47) and need OQ9.
+  deployment, by decision. The remaining pre-deployment gates in Section D are F31 and F32 and need OQ9.
 - **Chain-access layering & on-chain ID/ABI coupling:**
   - ADR-0001's "domain client" rule applies to TypeScript consumers. As a Rust service the gateway
     necessarily re-implements the read side (`sui_rpc.rs`).
-  - Drift is controlled by the vectors and the env-gated live test, not by sharing code. Record this
-    as an accepted exception to SC-M10 (Suggestion S6). The live test is red today (F45).
-  - IDs: no production constant is in the repo; the live-test fixtures deliberately name the superseded,
-    immutable `0xa55789…` package and `0xfd6c3b…` gate (B.SC-1). The current publication is
-    `0xd7ddaa94…388c9` (gate `0x316f1bf9…faddc`).
+  - Drift is controlled by the vectors, the hermetic wire-format fixtures and the optional live tests, not by sharing code. Record this
+    as an accepted exception to SC-M10 (Suggestion S6). The hermetic fixtures and the optional live tests are green (F45).
+  - IDs: no production constant is in the repo; the live-test defaults name the current publication
+    `0xd7ddaa94…388c9` (gate `0x316f1bf9…faddc`) and are overridable (B.SC-1).
   - Move git dependencies: N/A.
-  - ABI drift test: `live_consume_tx_valid` is env-gated (field numbers + event shape) and failing on a
-    pruned fixture.
+  - ABI drift test: hermetic fixtures pin the field numbers and event shape in CI; `live_consume_tx_valid`
+    is optional and takes a fresh consume from the environment.
   - **Pre-v0.2 policy:** no compatibility findings are raised. v1 is refused with no fallback (F1) and
     unrecognised gate JSON denies (F15); the old-package fallback was itself the defect.
 
@@ -1783,19 +1807,19 @@ The gateway is not deployed; "pre-testnet" below is the gate for putting it in f
 **Before the Rust gateway fronts any upstream (pre-testnet deployment):**
 
 1. MUST return distinct, coded 409 bodies (`redeemed` / `leased`) identical to Workers, and `503` for a
-   store error — **holds in code** (F2); the router-level test is missing (F47).
+   store error — **holds** (F2), with router-level tests (F47).
 2. MUST refuse `SINGLE_USE=true` without a persistent shared store (or with an explicit dev-only
    override) — **holds** (F4).
 3. MUST make redemption leases owner-bound (token-checked commit/release) and longer than the maximum
-   request duration — **holds for the upstream deadline** (F3); the body-read time is not added (F46).
+   request duration — **holds** (F3, F46: the body-read and upstream deadlines are both counted).
 4. MUST bound inbound header and body read time and cap connections — **holds** (F5).
 5. MUST fail startup on invalid boolean/numeric configuration — **holds** (F8).
 6. MUST rate-limit gated requests per client IP before signature verification — **holds** (F9).
 7. MUST strip upstream CORS headers and the full hop-by-hop set in both directions, consistent with
    `SECURITY.md` — **holds** (F12, F13).
-8. MUST read every page of owned objects, and decide consume success from the effects status — **does
-   not hold** (F17, F21: accepted while undeployed).
-9. MUST have a green ABI-drift check against a real fullnode — **does not hold** (F45).
+8. MUST read every page of owned objects, and decide consume success from the effects status — **holds**
+   (F17, F21).
+9. MUST have a green ABI-drift check against a real fullnode — **holds** (F45: hermetic fixtures in CI; optional live checks passed 2026-10-10).
 
 **Before mainnet:**
 
@@ -1806,7 +1830,8 @@ The gateway is not deployed; "pre-testnet" below is the gate for putting it in f
 12. MUST size memory limits to the documented product (small-body scope) and not carry relay-sized
     bodies — **holds as a scope decision** (F6); the manifest limit is unwritten (F32).
 13. MUST scan published images, publish a verification command, and record a credential inventory with
-    rotation — **does not hold** (F29, F30, F31).
+    rotation — **partly holds** (scan before signing and the command: F29, 0.0.22); the inventory and
+    rotation do not (F30, F31).
 
 **Lens baseline MUST lists.**
 
@@ -1821,8 +1846,8 @@ RUST lens:
 | RS-M5 | holds (outbound and inbound) | F38, F5 |
 | RS-M6 | holds for atomicity and fail-closed; `SINGLE_USE` requires Redis | F4, F39 |
 | RS-M7 | holds (challenge, public and gated pre-auth; IPv6 /64) | F9 |
-| RS-M8 | holds for `Debug` redaction, SIGTERM and a bounded drain; `UPSTREAM_URL` is logged by decision-pending | F19, F26 |
-| RS-M9 | holds for vector-covered behaviour; divergences are pagination and the status check | F17, F21 |
+| RS-M8 | holds (`Debug` redaction, the upstream URL never logged, SIGTERM and a bounded drain) | F19, F26 |
+| RS-M9 | holds (vector-covered behaviour; pagination and the status check now match) | F17, F21 |
 
 SUI_CLIENT lens:
 
@@ -1830,11 +1855,11 @@ SUI_CLIENT lens:
 | --- | --- | --- |
 | SC-M1 | holds (original-id for type and event filters; no call targets) | B.SC-1 |
 | SC-M2 | holds (exact normalised type) | `rejects_a_look_alike_package_consume_event` |
-| SC-M3 | partly (success inferred from events) | F21 |
+| SC-M3 | holds (success from the effects status) | F21 |
 | SC-M4 | holds (no u64 math beyond decimal parsing; addresses normalised) | I4 |
 | SC-M5 | holds by construction (one `SUI_RPC_URL`; `NETWORK`, `NFT_TYPE`, `GATE_ID` required, validated) | F8 |
 | SC-M6 | holds | F36 |
-| SC-M7 | holds for full type, sender, gate and age; success by event implication; nonce binding replaced by the redemption store and the signed digest | F23, F1, F21 |
+| SC-M7 | holds for full type, sender, gate and age; success from the effects status; nonce binding replaced by the redemption store and the signed digest | F23, F1, F21 |
 | SC-M8, SC-M9 | N/A (no PTBs) | |
 | SC-M10 | N/A for a Rust service; recorded exception | Suggestion S6 |
 
@@ -1852,13 +1877,13 @@ IMG lens:
 | ID | Holds? | Evidence |
 | --- | --- | --- |
 | IMG-M1 | holds | |
-| IMG-M2 | partly (`.env*` not excluded) | F29 |
+| IMG-M2 | holds (`.env*`, keys and `docs/` excluded) | F29 |
 | IMG-M3 | holds | |
 | IMG-M4 | holds | |
 | IMG-M5 | image non-root holds; pod context unverified | F32 |
 | IMG-M6 | unverified | F32 |
 | IMG-M7 | holds for public registries; private mirror unsigned | F29 |
-| IMG-M8 | does not hold (no image scan before signing; SBOM content unverified; no licence notices; no published verification command) | F29 |
+| IMG-M8 | partly (scan before signing, lockfile in the image for the SBOM and a published verification command from 0.0.22; licence notices not shipped; SBOM content to confirm on the next tag) | F29 |
 
 AUTH lens:
 
@@ -1878,23 +1903,23 @@ PROXY lens:
 | PX-M1 | holds (method list, safe-path check, URL from configuration) | F42 |
 | PX-M2 | holds for removal in both directions; forwarding fields are stripped, not rebuilt | F13 |
 | PX-M3 | holds | F12 |
-| PX-M4 | holds (no test) | I28, F47 |
+| PX-M4 | holds | I28, F47 |
 | PX-M5 | holds (header, body, connections, upstream and RPC deadlines) | F5, B.PX-2 |
 | PX-M6 | holds for network, timeout, redirect and store failures; relay error statuses pass through by decision | F44 |
-| PX-M7 | holds for the upstream deadline; the body-read time is not added | F3, F46 |
+| PX-M7 | holds (upstream deadline and body-read time) | F3, F46 |
 | PX-M8 | does not hold in this repo (lock and negative check are the deployment's) | F32 |
 | PX-M9 | holds | F8 |
 
 ## Implementation suggestions (SHOULD / MAY)
 
-- **S1** SHOULD add dispatcher-level tests (router + fake chain + recording upstream) for lease → commit,
+- **S1** (dispatcher-level tests done in 0.0.22; the shared-vector sections remain) SHOULD add dispatcher-level tests (router + fake chain + recording upstream) for lease → commit,
   lease → release on 5xx, duplicate → 409 `leased`, commit failure → 502, lost lease → 502, store
   error → 503, redirect → 502 with no credential sent, and an upstream `ACAO: *`; and SHOULD add
   `headerExtraction` and `redemptionConflict` sections to the shared vectors (published by
   nft-gate-client).
-- **S2** SHOULD run `redis_backend_round_trip` in CI with a Redis service container, so the atomic
+- **S2** (done in 0.0.22) SHOULD run `redis_backend_round_trip` in CI with a Redis service container, so the atomic
   paths are exercised on every push.
-- **S3** SHOULD add a chunked over-cap request test, a slow-body test, a stalled-upstream test and a
+- **S3** (done in 0.0.22) SHOULD add a chunked over-cap request test, a slow-body test, a stalled-upstream test and a
   shutdown-bound test.
 - **S4** MAY upgrade to axum 0.8.
 - **S5** MAY expose Prometheus-style counters for denials by reason, 409s, commit failures and
@@ -1903,14 +1928,14 @@ PROXY lens:
   implementation, guarded by the shared vectors plus the live test.
 - **S7** MAY name `FLAG_PASSKEY = 0x06` explicitly so the fail-closed arm is self-documenting
   (behaviour already correct and vector-pinned).
-- **S8** SHOULD validate `UPSTREAM_URL` has no path, query or userinfo, so `format!("{}{}", upstream,
+- **S8** (userinfo refused in 0.0.22) SHOULD validate `UPSTREAM_URL` has no path, query or userinfo, so `format!("{}{}", upstream,
   path)` can never produce surprising URLs.
 - **S9** SHOULD give public paths their own limiter and `PUBLIC_RATE_LIMIT_PER_MIN` (env parity with
   Workers). Today a client polling `/v1/tip-config` spends its `/v1/challenge` budget and vice versa.
-- **S10** SHOULD build the image with `cargo auditable` (or ship `Cargo.lock` and licence notices) so
+- **S10** (scan, lockfile and verification command done in 0.0.22; licence notices remain) SHOULD build the image with `cargo auditable` (or ship `Cargo.lock` and licence notices) so
   the SBOM lists the compiled crates, add `trivy image` before signing, and publish a `cosign verify`
   command that pins the publish workflow identity (F29).
-- **S11** SHOULD make the live test self-refreshing (find a recent `AccessConsumedEvent` at run time,
+- **S11** (decided in 0.0.22: hermetic fixtures plus an env-supplied fresh consume) SHOULD make the live test self-refreshing (find a recent `AccessConsumedEvent` at run time,
   or consume on localnet) so it cannot age out (F45).
 
 ## Open questions
@@ -1952,7 +1977,8 @@ PROXY lens:
   pre-deployment gates are in Section D.)*
 - **OQ10** How should the live ABI-drift test get a fixture that does not age out of public fullnode
   retention (a consume made at run time on localnet, a recent testnet consume refreshed by hand, or an
-  archival endpoint)? *(Open; maintainer; see F45.)*
+  archival endpoint)? *(Decided 2026-10-10: hermetic wire-format fixtures in CI plus optional live checks
+  that take a fresh consume from `NFT_GATE_LIVE_*`, and a fixture-free live gate/ownership check; see F45.)*
 
 ## Risks
 
@@ -1968,12 +1994,12 @@ PROXY lens:
   responsibility.
 - **Supply chain.** Baked-in webpki roots and the base images age between rebuilds, and crate
   advisories may appear after release. The mitigation is Dependabot, scheduled rebuilds and an image
-  scan (not yet present, F29). The published image may lag `main` (it does today: Dependabot merges).
+  scan (before signing from 0.0.22, F29). The published image may lag `main` (it does today: Dependabot merges).
 - **Upstream origin lock.** If the upstream is reachable without the gateway, every guarantee here is
   moot. That is verifiable only against a live deployment.
-- **An undeployed gateway ages.** Parity with the live Workers gateway is checked only by the shared
-  vectors and per-suite tests; the live ABI check is currently red (F45). Untested divergence can
-  accumulate (F17, F21) until a deployment is decided.
+- **An undeployed gateway ages.** Parity with the live Workers gateway is checked by the shared
+  vectors and per-suite tests (the pagination and status-check divergences were closed in 0.0.22, F17,
+  F21). Untested divergence can accumulate until a deployment is decided.
 
 ---
 
@@ -2028,10 +2054,28 @@ PROXY lens:
     Rust; the code has neither (F17, F21). That table needs a correction on the Workers side.
   - Template dates reconciled to the lens registry; pre-save consistency checklist run.
 
+- 2026-10-10 — Fix wave (0.0.22, commit pending; the local checkout is `7f512d9` plus the audit edit).
+  - Fixed and re-measured: F17 (paged ownership, bound 100), F21 (effects status), F26 (no upstream URL in
+    logs or `Debug`; userinfo refused), F46 (lease > upstream + body-read), F47 (`router_tests.rs`, connection
+    cap, shutdown bound, Redis in CI), F45 (hermetic fixtures; optional live checks; OQ10 decided), F28
+    (`--locked`, coverage figure, `rustup` toolchain, Redis service) and the CI/Docker parts of F29 (Trivy
+    image scan before signing, lockfile in the image, `.dockerignore`, published `cosign verify`). F27
+    mitigated (the `wrangler.toml` comment is a Workers-side file). F43 left open for parity.
+  - Measured: `cargo fmt --check` clean; `cargo clippy --all-targets --locked -- -D warnings` clean; `cargo test
+    --locked` 114 passed, 0 failed, 3 ignored (the 27 shared `proofDecodeRejects` cases, 11 of them new,
+    pass in `conformance_shared_vectors`); coverage 90.7 % of lines.
+  - Live, read-only, 2026-10-10: `live_gate_and_ownership_requests_are_accepted` and `live_consume_tx_valid`
+    (a recent consume on the current relay gate) pass against `fullnode.testnet.sui.io`, confirming the
+    `effects.status` field numbers; paging field numbers checked against the `@mysten/sui` generated proto.
+  - Counts: **24 RESOLVED, 3 MITIGATED** (F10, F27, F29), **6 ADJUDICATED, 4 ACCEPTED-RISK** (F11, F25, F34,
+    F43), **3 DEFERRED** (F30, F31, F32); 8 Positive. Still unticked in Section D: F29 (private mirror, OQ8),
+    F30, F31, F32 and the maintainer items.
+  - Not exercised here: the Trivy image scan and the cosign steps (registry credentials), `cargo deny` (not
+    installed locally; green in CI on the previous tag).
+
 ## Pre-save consistency checklist (this pass)
 
-- [x] Section A ↔ findings — every GAP row cites an accepted or deferred finding (I7 F17, I18 F26,
-  I22 F17/F21, I27 F32, I30 F46, I31 F45); HOLDS rows cite a RESOLVED/ADJUDICATED finding or none.
+- [x] Section A ↔ findings — every GAP row cites an accepted or deferred finding (I27 F32 only); HOLDS rows cite a RESOLVED/ADJUDICATED finding or none.
 - [x] Finding header ↔ body — no stale status lines; remediation text describes what was done.
 - [x] Template line: base + RUST + SUI_CLIENT + WALRUS + IMG + AUTH + PROXY, each dated as in the
   registry.
@@ -2039,7 +2083,7 @@ PROXY lens:
 - [x] Open questions: OQ8–OQ10 open; the others carry a recorded decision note, the dispositions moved
   on the findings.
 - [x] Section D ↔ dispositions — ticked only for RESOLVED/ADJUDICATED/MITIGATED-with-evidence items;
-  unticked items cite F17, F21, F26, F28–F32, F45–F47 or maintainer items.
+  unticked items cite F29–F32 or maintainer items.
 - [x] Executive summary reflects current dispositions.
-- [x] Counts and versions re-measured 2026-10-09 (live test 2026-10-10).
+- [x] Counts and versions re-measured 2026-10-10 (0.0.22 locally; published versions as read 2026-10-10).
 - [x] Re-verification log entry added.
