@@ -37,7 +37,7 @@
   upstream, and a redemption-store failure would let one paid single-use consume buy unlimited
   uploads. The gateway holds no user funds and signs nothing on-chain, so nothing here reaches
   Critical.
-**Status:** fix wave 2026-10-10 (0.0.22, commit pending) — 40 findings dispositioned (24 RESOLVED,
+**Status:** fix wave 2026-10-10 (0.0.22, commit `40a7e89`) — 40 findings dispositioned (24 RESOLVED,
   3 MITIGATED, 6 ADJUDICATED, 4 ACCEPTED-RISK, 3 DEFERRED) plus 8 Positive; re-verified 2026-10-09, F42–F48
   added in that pass
 
@@ -782,7 +782,7 @@ vector (S1).
 
 ### F17 — `ListOwnedObjects` reads one page of 50 without a cursor; Workers paginates
 
-**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit `40a7e89`)
 **Where:** `src/sui_rpc.rs` (`scan_owned`, `build_list_owned`, `MAX_OWNED_PAGES`); before 0.0.22 `owns_nft_live`
 sent `page_size` 50 and read the first page only.
 **Issue:** A holder whose qualifying pass is beyond the first 50 objects of `NFT_TYPE` is denied. This
@@ -856,7 +856,7 @@ released: the token no longer matches). Recorded so the operator-cost trade-off 
 
 ### F21 — Single-use check relies on "events imply success" instead of the effects status
 
-**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit `40a7e89`)
 **Where:** `src/sui_rpc.rs` (`build_get_transaction`, `effects_succeeded`, `response_has_consume`).
 **Issue:** The Sui client lens §A *Execution result* requires success to be decided by the effects
 status. On Sui a failed transaction emits no events, so the inference is correct today. But the
@@ -948,7 +948,7 @@ attacker-reachable).
 
 ### F26 — Startup log prints `UPSTREAM_URL`
 
-**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit `40a7e89`)
 **Where:** `src/main.rs` (startup `tracing::info!`), `src/config.rs` (`Debug`, `check_scheme`).
 **Issue:** The full upstream URL is logged at `info`. The Workers deployment treats the same value as
 a secret ("so the private origin never appears in this public file"), and an operator may embed
@@ -966,7 +966,7 @@ never logged. The startup `info` line no longer carries `UPSTREAM_URL`, `Gateway
 
 ### F27 — Documentation drift (deployment targets, links, module docs)
 
-**Severity:** Info   **Disposition:** MITIGATED (fixed in 0.0.22 except the `wrangler.toml` comment in `gateway-workers/`; commit pending)
+**Severity:** Info   **Disposition:** MITIGATED (fixed in 0.0.22 except the `wrangler.toml` comment in `gateway-workers/`; commit `40a7e89`)
 **Where:**
 
 - `gateway-rust/CLAUDE.md`: "Published to GHCR" (the workflow pushes to quay.io + Docker Hub); "See
@@ -998,7 +998,7 @@ left for the Workers pass); that is why this stays MITIGATED.
 
 ### F28 — CI omissions: `--locked` on test/clippy, `cargo audit`, coverage figure, toolchain-action pin
 
-**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit `40a7e89`)
 **Where:** `.github/workflows/rust-ci.yml` (and `crates-publish.yml` for the toolchain step).
 **Issue / Impact:** Lockfile drift would not fail CI. The lens's coverage-figure requirement is unmet.
 
@@ -1014,7 +1014,7 @@ instead of `dtolnay/rust-toolchain`, whose only reference is a moving `master` b
 
 ### F29 — Image supply chain: no image vulnerability scan; unsigned private-registry mirror; `.dockerignore` gaps
 
-**Severity:** Low   **Disposition:** MITIGATED (0.0.22; commit pending; the private mirror and licence notices need OQ8)
+**Severity:** Low   **Disposition:** MITIGATED (0.0.22; commit `40a7e89`; the private mirror and licence notices need OQ8)
 **Where:**
 
 - `.github/workflows/docker-publish.yml` (Trivy image scan before signing, merge job); `build-docker-*-private`
@@ -1301,7 +1301,7 @@ releases the lease so the consume is not lost. Revisit if a third-party upstream
 
 ### F45 — The env-gated live test fails: its fixed historic transaction was pruned by the public fullnode (found 2026-10-10)
 
-**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit pending; OQ10 decided)
+**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit `40a7e89`; OQ10 decided)
 **Where:** `src/sui_rpc.rs::tests` (hermetic fixtures, `live_*`); `README.md` "Build and test".
 **Issue:** The test replays one fixed `access_gate::consume` on the **superseded** testnet package
 `0xa55789d7…886d41` and gate `0xfd6c3b2a…0ab8a6` (digest `8br5PGrz…TgUkP`). Using the superseded ids is
@@ -1332,7 +1332,7 @@ and an archival endpoint is an operator dependency.
 
 ### F46 — The lease startup check ignores the body-read time
 
-**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Severity:** Low   **Disposition:** RESOLVED (0.0.22; commit `40a7e89`)
 **Where:** `src/config.rs` (`from_lookup`: the lease check); `src/main.rs::redeem_and_forward` takes the lease before `proxy::forward` reads the body.
 **Issue:** The PROXY lens §A *Admission state* wants the claim's lifetime to exceed the maximum request
 time, checked at startup. The maximum request time here is the body-read deadline plus the upstream
@@ -1352,7 +1352,7 @@ README and the module docs state the rule.
 
 ### F47 — Test gaps against the RUST and PROXY lens coverage requirements
 
-**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit pending)
+**Severity:** Info   **Disposition:** RESOLVED (0.0.22; commit `40a7e89`)
 **Where:** `src/router_tests.rs`, `src/testkit.rs`, `src/main.rs` tests, `src/sui_rpc.rs` tests (117 tests, 3 ignored, in 0.0.22).
 **Issue:** Present: store-level lease, commit, release and expiry; header policy and path unit tests;
 router tests for CORS, public methods, the pre-auth limit and a stalled head; config validation; the
@@ -2054,7 +2054,7 @@ PROXY lens:
     Rust; the code has neither (F17, F21). That table needs a correction on the Workers side.
   - Template dates reconciled to the lens registry; pre-save consistency checklist run.
 
-- 2026-10-10 — Fix wave (0.0.22, commit pending; the local checkout is `7f512d9` plus the audit edit).
+- 2026-10-10 — Fix wave (0.0.22, commit `40a7e89`; the local checkout is `7f512d9` plus the audit edit).
   - Fixed and re-measured: F17 (paged ownership, bound 100), F21 (effects status), F26 (no upstream URL in
     logs or `Debug`; userinfo refused), F46 (lease > upstream + body-read), F47 (`router_tests.rs`, connection
     cap, shutdown bound, Redis in CI), F45 (hermetic fixtures; optional live checks; OQ10 decided), F28

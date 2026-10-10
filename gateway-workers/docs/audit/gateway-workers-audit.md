@@ -144,7 +144,7 @@ against `main` (`367e673`).
 **What remains.** Nothing above Info/Low is unresolved in code. The one DEFERRED item is
 maintainer-owned: the **Cloudflare plan** and body/CPU sizing (F11, OQ3). Three items are MITIGATED with
 a stated residual: deploy-environment reviewers and API-token scopes (F16, F31, OQ4) and the `unknown`
-IP bucket (F29). Fixed after the first re-verification (2026-10-10, unreleased, commit pending): the
+IP bucket (F29). Fixed after the first re-verification (2026-10-10, unreleased, commit `ec91935`): the
 **scheduled negative origin-lock check** (F32: `origin-lock.yml`), the cosmetic stale comments (F21),
 the residual test gaps (F30) and the base64/UTF-8/JSON layers of proof decoding (F47,
 nft-gate-client 0.0.17).
@@ -842,7 +842,7 @@ and releases the lease", "a holder whose lease lapsed before commit is told 502�
 ### F21 — Stale and misleading comments, and dead code
 
 **Severity:** Info   **Disposition:** RESOLVED (binding-model statements 0.0.19; the remaining cosmetic items
-2026-10-10, unreleased, commit pending)
+2026-10-10, unreleased, commit `ec91935`)
 **Where:**
 
 - `src/chain.ts:9-12` (module doc: "bound to the challenge nonce + sender + gate") contradicts
@@ -864,7 +864,7 @@ model in exactly the area where F1/F23 matter.
   nonce"); `nonceMatches` (`chain.ts:320`) is exported, unused and no longer tested; `cors.ts:4-5`;
   `wrangler.toml:3`; the `proxy.ts` `@ts-expect-error` comment; and `CLAUDE.md`'s "Fallback: Workers KV"
   bullet that calls the single-use bind "unaffected" (contradicts F2's fix).
-- 2026-10-10 (unreleased, commit pending): the `chain.ts` module doc now says the event is not
+- 2026-10-10 (unreleased, commit `ec91935`): the `chain.ts` module doc now says the event is not
   nonce-bound (F23); `nonceMatches` and its import are deleted (no caller, no test); `cors.ts` no longer
   names `sui.meddleware.co.uk`; `wrangler.toml` points at `../gateway-rust`; the `proxy.ts`
   `@ts-expect-error` note says what is missing from the type; `CLAUDE.md`'s KV bullet now says
@@ -1007,7 +1007,7 @@ falls back to `'unknown'`).
 ### F30 — Coverage gaps against the WORKERS and TS lens requirements
 
 **Severity:** Info   **Disposition:** RESOLVED (most gaps closed in 0.0.19; the residual tests 2026-10-10,
-unreleased, commit pending)
+unreleased, commit `ec91935`)
 **Where:** `test/**`.
 
 **Issue:** The following required tests are missing:
@@ -1038,7 +1038,7 @@ No coverage tool or figure is configured.
   cached**; a router-level test that a store outage is `503` (only the unit-level propagation is
   tested); a test of the IPv6 /64 keying and of the degrade-flag branch (F2). No coverage tool is
   configured (`@vitest/coverage-v8` on the Node pool remains a suggestion).
-- 2026-10-10 (unreleased, commit pending), all in the workerd project, `test/gateway-state.test.ts`:
+- 2026-10-10 (unreleased, commit `ec91935`), all in the workerd project, `test/gateway-state.test.ts`:
   public-path rate limit (120 pass, the 121st is 429 with CORS, another IP unaffected); IPv6 `clientIp`
   cases and a 30-request rotation inside one /64 that is then limited while a neighbouring /64 is not;
   `forward()` of a gated request neither calls `cache.match` nor `cache.put`; a throwing Durable Object
@@ -1078,7 +1078,7 @@ No coverage tool or figure is configured.
 
 ### F32 — Origin lock is verified positively, not negatively
 
-**Severity:** Low   **Disposition:** RESOLVED (2026-10-10, unreleased, commit pending; first GitHub run
+**Severity:** Low   **Disposition:** RESOLVED (2026-10-10, unreleased, commit `ec91935`; first GitHub run
 to be confirmed after the push)
 **Where:** `scripts/check-upstream-auth.mjs` (asserts the origin **accepts** the token, with
 `redirect: 'manual'`), `deploy-workers.yml` (`UPSTREAM_CHECK_URL`), `README.md:96-125`.
@@ -1333,8 +1333,7 @@ created for mainnet should set `pause_blocks_access` deliberately.
 
 ### F47 — Proof-token base64, UTF-8 and JSON layers were lenient in the client decoder (parity with `gateway-rust`)
 
-**Severity:** Low   **Disposition:** RESOLVED (nft-gate-client 0.0.17 adopted 2026-10-10, unreleased, commit
-pending). Not the same finding as `gateway-rust` F47. Origin: nft-gate-client audit F24.
+**Severity:** Low   **Disposition:** RESOLVED (nft-gate-client 0.0.17 adopted 2026-10-10, unreleased, commit `ec91935`). Not the same finding as `gateway-rust` F47. Origin: nft-gate-client audit F24.
 **Where:** `decodeAccessProof` in `@meddleware/nft-gate-client` (imported by `src/wire.ts`), through
 `atob` / `TextDecoder` / `JSON.parse`.
 
@@ -1491,7 +1490,7 @@ N/A — no PTBs. Read-side coupling:
 
 ### B.SC-3 Cross-implementation parity (home table for both gateways)
 
-Rust column from `gateway-rust` 0.0.21 (its own audit is canonical for it; rows marked **none** or **one page** are gaps recorded there, corrected here on 2026-10-10 — an earlier version of this table over-stated parity).
+Rust column from `gateway-rust` 0.0.22 (its own audit is canonical for it). Three rows over-stated parity until 0.0.22 (effects-status check, pagination, router-level tests); they were corrected on 2026-10-10 and are now at parity.
 
 | Behaviour | `gateway-workers` | `gateway-rust` | Shared vector / test |
 | --- | --- | --- | --- |
@@ -1505,13 +1504,13 @@ Rust column from `gateway-rust` 0.0.21 (its own audit is canonical for it; rows 
 | Header extraction | `/^Bearer\s+(.+)$/i`, then `X-Access-Proof` | Bearer parsed like Workers (0.0.19), then `X-Access-Proof` | none (unit tests in both) |
 | Verification order | decode → sig → normalise → nonce → pause → consume/own | same | per-suite unit tests; no vector |
 | Status mapping | missing 401; ChainError 502; others 403; store 503 | same | none shared (`GATEWAY_STATUS` constants in nft-gate-client are not imported by either) |
-| Redemption conflict | 409 with `code: redeemed \| leased` | 409 with `code` | Workers router tests; Rust has no router-level test of the mapping (gateway-rust F47); vocabulary `GATEWAY_CONFLICT_CODES` in nft-gate-client |
-| Store error | 503 (`StoreError`) | 503 | Workers router tests; no router-level Rust test (gateway-rust F47) |
-| Consume success check | `$kind === 'Transaction'` + `status.success` | **none** — event match only (gateway-rust F21, DEFERRED to the deploy decision) | Workers unit tests only |
+| Redemption conflict | 409 with `code: redeemed \| leased` | 409 with `code` | router tests in both (Rust `router_tests.rs`, 0.0.22, gateway-rust F47); vocabulary `GATEWAY_CONFLICT_CODES` in nft-gate-client |
+| Store error | 503 (`StoreError`) | 503 | router tests in both (gateway-rust F47, 0.0.22) |
+| Consume success check | `$kind === 'Transaction'` + `status.success` | effects status must be success (0.0.22, gateway-rust F21) | unit tests in both; router test in Rust |
 | Event type | exact normalised `<pkg>::access_gate::AccessConsumedEvent` | same | look-alike tests in both ✓ |
 | Event binding | sender + `gate_id` + age (not nonce) | same | unit tests in both |
 | `GetTransaction` retry | not-found only, 4 × 500 ms; malformed digest never sent | same | unit tests in both |
-| Owned-object pagination | all pages ≤ `MAX_OWNED_PAGES` (100) | **one page of 50** (gateway-rust F17, DEFERRED to the deploy decision) | — |
+| Owned-object pagination | all pages ≤ `MAX_OWNED_PAGES` (100) | all pages of 50, ≤ 100 pages, over the longer list a chain error (0.0.22, gateway-rust F17) | unit tests in both |
 | Ownership uses check | usable passes only | usable passes only | unit tests in both |
 | Pause parse | strict; unrecognised JSON denies | strict | unit tests in both |
 | Nonce | 24 B random, `<shard>.<hex>` | 24 B OsRng, hex | each self-consistent |
@@ -1706,7 +1705,7 @@ PROXY lens §C:
   `Record<string, Json>` and then field-checked; `@ts-expect-error` on `duplex` (comment stale, F21)
 - [x] the negative origin check runs on a schedule — F32 / OQ10 (`origin-lock.yml`, daily; the
   repository variable `UPSTREAM_CHECK_URL` already exists; run locally against the live origin
-  2026-10-10, first GitHub run to confirm after the release; commit pending)
+  2026-10-10, first GitHub run to confirm after the release; commit `ec91935`)
 - [ ] mainnet `access_gate` published and `NFT_TYPE`/`GATE_ID`/`NETWORK`/`GATEWAY_ORIGIN` populated from
   the canonical record — not yet (mainnet publication is a maintainer step, `OPERATOR_TASKS.md`
   "Mainnet release custody")
@@ -1973,7 +1972,7 @@ PROXY lens:
     added 2026-10-10; see the last log entry.)*
   - Template dates reconciled to the lens registry; pre-save consistency checklist run.
 
-- 2026-10-10 — Fix wave on `main` `9e33df6` (unreleased, no version bump here; commit pending).
+- 2026-10-10 — Fix wave on `main` `9e33df6` (unreleased, no version bump here; commit `ec91935`).
   - Fixed: F32 (RESOLVED: `origin-lock.yml` + `check-origin-locked.mjs`, daily, secret-free), F21
     (RESOLVED: comments and dead `nonceMatches`), F30 (RESOLVED: five missing tests,
     `gateway-state.test.ts`) and new F47 (RESOLVED: nft-gate-client 0.0.17 strict proof decoding, 27
