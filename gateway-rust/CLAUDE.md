@@ -14,17 +14,20 @@ queries the chain over **gRPC-web** (`application/grpc-web+proto`, HTTP/1.1) via
 hand-rolled client in `grpc.rs` — deliberately **without** `tonic`/`prost`/`sui-rpc`, to keep the
 lightweight build (same rationale as avoiding `reqwest`; see the HTTP-client note). `grpc.rs` is a
 tiny protobuf writer/reader + gRPC-web framing over the shared `HttpClient`; only the fields the
-gateway reads are decoded. Field numbers are pinned from `MystenLabs/sui-apis` and validated against
-live responses (`sui_rpc::tests::live_consume_tx_valid`, `--ignored`).
+gateway reads are decoded. Field numbers are pinned from `MystenLabs/sui-apis` and pinned by hermetic
+gRPC-web fixtures in `sui_rpc.rs` (literal field numbers, no network) and checked against a real node by
+the optional `--ignored live_` tests, which take a fresh consume from `NFT_GATE_LIVE_*` env vars
+(public fullnodes prune old transactions, so no digest is fixed in the source).
 
 - `consume_tx_valid` (single-use) is **digest-first**, mirroring the Workers gateway:
-  `LedgerService/GetTransaction` (retried 4× at 500 ms) → an event of **exactly**
+  `LedgerService/GetTransaction` (retried 4× at 500 ms) → a transaction whose effects status is success, with an event of **exactly**
   `<NFT_TYPE package>::access_gate::AccessConsumedEvent` (never a suffix match — any package can
   declare an `access_gate` module) for this **sender + gate** (gate read via
   a recursive lookup of the event's `google.protobuf.Value` json, so no BCS field-order assumption).
   It is NOT bound to the challenge nonce — single-use is enforced by the redemption store below.
 - `owns_nft` (non-single-use) uses `StateService/ListOwnedObjects`, matching `gate_id` via the same
-  json lookup.
+  json lookup. It reads every page (50 per page, at most `MAX_OWNED_PAGES` = 100, as in the Workers
+  gateway) and errors past the bound.
 
 ## Single-use redemption (a consumed use is never lost)
 
@@ -55,7 +58,7 @@ tune the lease/retention windows. `redeemed`/`leased` → `409` with a machine-r
 `AppState` is the single shared object (`Arc<AppState>`) threaded through every request handler:
 - `cfg: GatewayConfig` — loaded from env vars at startup; immutable for the process lifetime.
 - `store: NonceStore` — in-memory or Redis, depending on `REDIS_URL`.
-- `limiter: RateLimiter` — `Mutex<HashMap>`, per-address fixed 60s window.
+- `limiter: RateLimiter` — `Mutex<HashMap>`, per-address fixed 60s window (post-auth); `ip_limiter` (challenge and public paths) and `preauth_limiter` (gated requests, before verification) are the same limiter keyed by client IP.
 - `chain: SuiRpc` — Sui gRPC-web client (`grpc.rs`; public fullnodes deprecated JSON-RPC); optional in-memory ownership cache.
 - `http: HttpClient` — shared `hyper` client used by both the proxy and the RPC client.
 
@@ -91,9 +94,10 @@ compile-time dep chain (~10 min on GHA). All URLs are operator-configured ASCII 
 
 ## Deployment targets
 
-- **Docker:** Dockerfile uses a multi-stage build (builder → distroless). Published to GHCR
-  via the publish workflow.
-- **Kubernetes:** See `infrastructure/k8s/` in the vault monorepo for k8s manifests.
+- **Docker:** Dockerfile uses a multi-stage build (builder → distroless). Published to quay.io and Docker Hub
+  (signed, with an SBOM attestation) by `docker-publish.yml` on a `v*` tag.
+- **Kubernetes:** no manifests live in this repo, and the gateway is not deployed (the paywall runs on
+  `gateway-workers/`; audit F32, OQ9). Deploy by image digest with a non-root, read-only-root pod.
 - **Bare metal / VM:** `cargo install nft-gate-gateway` or `cargo build --release`.
 
 ## Ownership cache

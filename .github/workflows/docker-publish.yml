@@ -160,6 +160,24 @@ jobs:
           DIGEST=$(docker buildx imagetools inspect "${PRIMARY}" --format '{{.Manifest.Digest}}')
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
 
+      # Scan the merged image by digest BEFORE anything is signed or attested: a failing scan means
+      # no signature, so consumers verifying signatures never accept a vulnerable image. HIGH and
+      # CRITICAL findings with a fix fail the job; the image tags are already pushed, so a failure
+      # needs a fixed rebuild (a new tag), not a re-run.
+      - name: Scan the published image (Trivy)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: quay.io/${{ vars.QUAY_NAMESPACE }}/${{ env.IMAGE }}@${{ steps.merge.outputs.digest }}
+          version: v0.74.0
+          scanners: vuln,secret
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+        env:
+          TRIVY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          TRIVY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
+
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign images (keyless)

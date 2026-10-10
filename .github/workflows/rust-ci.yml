@@ -16,6 +16,14 @@ jobs:
   rust-ci:
     name: Rust gateway (gateway-rust)
     runs-on: ubuntu-latest
+    # A real Redis for the env-gated backend round trip (Lua lease/commit/release, GETDEL).
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
     defaults:
       run:
         working-directory: gateway-rust
@@ -26,10 +34,10 @@ jobs:
         working-directory: .
         run: bash scripts/check-versions.sh
 
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
+      # rustup ships on the runner image; using it directly leaves no third-party toolchain action
+      # (which publishes no releases, only a moving branch) to pin.
+      - name: Install the stable toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy,llvm-tools-preview --no-self-update && rustup default stable
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -42,18 +50,34 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test
+        run: cargo test --locked
 
-      # Advisories, licences, bans and sources per deny.toml (supersedes the audit-only check).
+      - name: Redis backend round trip
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+        run: cargo test --locked -- --ignored redis_backend
+
+      # Coverage figure (RUST lens): printed to the job summary; informational, not a gate.
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-llvm-cov@0.9.1
+
+      - name: Coverage
+        run: |
+          cargo llvm-cov --locked --summary-only | tee coverage.txt
+          { echo '### Line coverage (gateway-rust)'; echo '```'; tail -n 3 coverage.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      # Advisories, licences, bans and sources per deny.toml. The `advisories` check reads the same
+      # RustSec database as `cargo audit`, so it supersedes the audit-only check (no second tool).
       - name: cargo deny
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           manifest-path: gateway-rust/Cargo.toml
-      # Release build is intentionally omitted: cargo test already verifies
-      # compilation. The release binary is built inside the Dockerfile.
+      # The release binary is built inside the Dockerfile (with --locked).
 
   msrv:
     name: MSRV (rust-version in Cargo.toml)
@@ -63,9 +87,8 @@ jobs:
         working-directory: gateway-rust
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # master
-        with:
-          toolchain: "1.88"
+      - name: Install the declared minimum toolchain
+        run: rustup toolchain install 1.88 --profile minimal --no-self-update && rustup default 1.88
       - name: Check on the declared minimum toolchain
         run: cargo check --locked
 

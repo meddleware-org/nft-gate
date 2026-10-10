@@ -4,7 +4,7 @@
 [![Crates.io](https://img.shields.io/crates/v/nft-gate-gateway)](https://crates.io/crates/nft-gate-gateway)
 [![License: 0BSD](https://img.shields.io/badge/license-0BSD-blue)](LICENSE)
 
-A generic NFT-gated reverse proxy for the [access_gate](https://github.com/meddleware-org/vault) primitive on Sui. Put it in front of any HTTP upstream — an upload relay, a website, a game API — to restrict access to holders of an on-chain access NFT.
+A generic NFT-gated reverse proxy for the [access_gate](https://github.com/meddleware-org/access-gate-sui) primitive on Sui. Put it in front of any HTTP upstream — an upload relay, a website, a game API — to restrict access to holders of an on-chain access NFT.
 
 Two wire-identical implementations are provided. Choose one based on your deployment target:
 
@@ -119,7 +119,7 @@ node scripts/sync-vectors.mjs --check  # CI: fail if the copy differs
 - You need Redis-backed nonce state for horizontal scale-out
 - You want the lowest possible latency on your own hardware
 
-Both are drop-in: they expose the same endpoints, accept the same environment variables, and produce identical verification decisions for any given proof token.
+Both expose the same endpoints, accept the same environment variables, and produce identical verification decisions for any given proof token. The Rust gateway buffers request bodies, so it is scoped to small-body upstreams (see its README, "Request body limit"); it is not a drop-in for a 100 MiB upload relay.
 
 ## License
 

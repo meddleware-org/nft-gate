@@ -34,6 +34,9 @@ Released with the Workers gateway 0.0.22 (one version for every artifact); parit
   `413`/`408`/`504`, redirects, path policy; F47); hermetic gRPC-web fixtures pinning the field numbers
   of `GetTransaction`, `GetObject` and paged `ListOwnedObjects` (F45); the optional live checks take a
   fresh consume from `NFT_GATE_LIVE_*` instead of a fixed, prunable digest.
+- The image ships `Cargo.lock` (so its SBOM lists the compiled crates), `.dockerignore` also excludes
+  `.env*`, key files and `docs/`, and the publish workflow scans the merged image with Trivy before it
+  is signed (F29).
 - Dev-dependency `futures-util` (already in the graph via axum) for streamed test bodies.
 
 ## [0.0.21] - 2026-10-08

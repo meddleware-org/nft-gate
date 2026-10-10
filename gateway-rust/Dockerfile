@@ -33,6 +33,9 @@ RUN cargo build --release --locked && strip target/release/nft-gate-gateway
 FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 WORKDIR /app
 COPY --from=builder /src/target/release/nft-gate-gateway /app/nft-gate-gateway
+# The lockfile makes the image's SBOM list the compiled crates (a stripped binary carries none);
+# it is inert at runtime.
+COPY --from=builder /src/Cargo.lock /app/Cargo.lock
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/app/nft-gate-gateway"]

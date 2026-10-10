@@ -91,8 +91,8 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 | --- | --- | --- | --- |
 | `GATEWAY_ORIGIN` | ✓ | — | This gateway's canonical public origin (`https://host`, no path, lower-case); signed into every proof (`nft-gate:access:v2`) |
 | `NETWORK` | ✓ | — | `localnet` \| `devnet` \| `testnet` \| `mainnet`; signed into every proof |
-| `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream |
-| `SUI_RPC_URL` | ✓ | — | Sui fullnode (queried over gRPC-web) for ownership and event queries |
+| `UPSTREAM_URL` | ✓ | — | Base URL of the protected upstream; never logged, and must not carry credentials (use `UPSTREAM_AUTH_HEADERS`) |
+| `SUI_RPC_URL` | ✓ | — | Sui fullnode (queried over gRPC-web) for ownership and event queries; must not carry credentials (use `SUI_RPC_AUTH_HEADER`) |
 | `NFT_TYPE` | ✓ | — | `<pkg>::access_gate::AccessNFT` (or the soulbound type); any other type — e.g. a fungible `Coin<T>` — is rejected at startup |
 | `GATE_ID` | ✓ | — | The gate whose passes are accepted; also read live so a paused gate with `pause_blocks_access` denies holders (`403 the gate is paused`) |
 | `SINGLE_USE` | | `false` | Require a `consumeDigest` naming a successful `access_gate::consume` by the proof address on `GATE_ID`; each digest is redeemable once |
@@ -114,7 +114,7 @@ Any gated route without a valid proof token returns `401 Unauthorized`.
 | `UPSTREAM_AUTH_HEADERS` | | — | JSON array `[{"name":…,"value":…}]` of headers added to every upstream request (secret; same format as `gateway-workers`); invalid JSON aborts startup |
 | `SUI_RPC_AUTH_HEADER` | | — | `Name: value` header added to every Sui RPC call (secret); a bare value is refused |
 | `ALLOW_INSECURE_HTTP` | | — | `1` permits `http://` `UPSTREAM_URL` / `SUI_RPC_URL` (localnet, in-cluster upstream); otherwise both must be `https://` |
-| `REDEMPTION_LEASE_TTL_SECS` | | `900` | Single-use: lease window for an in-flight consume-digest redemption; must exceed `UPSTREAM_TIMEOUT_SECS` |
+| `REDEMPTION_LEASE_TTL_SECS` | | `900` | Single-use: lease window for an in-flight consume-digest redemption; must exceed `UPSTREAM_TIMEOUT_SECS` + `BODY_READ_TIMEOUT_SECS` |
 | `CONSUME_MAX_AGE_SECS` | | `432000` | Single-use: oldest accepted consume (5 days); at most `REDEMPTION_RETENTION_SECS` |
 | `ALLOW_VOLATILE_REDEMPTIONS` | | `false` | Single-use without `REDIS_URL`: accept that spent consumes are forgotten on restart (development only; otherwise `SINGLE_USE=true` requires `REDIS_URL`) |
 | `GATED_PREAUTH_RATE_LIMIT_PER_MIN` | | `120` | Per-client-IP budget for gated requests, checked before signature verification (`0` disables) |
@@ -191,13 +191,19 @@ accepting that brief window of staleness. The cache is never applied to single-u
 
 ```bash
 cargo fmt --check                        # format check
-cargo clippy --all-targets -- -D warnings  # lint
-cargo test                               # unit + property tests + shared conformance vectors
-cargo deny check                         # advisories, licences, sources (deny.toml)
-cargo build --release                    # production binary
+cargo clippy --all-targets --locked -- -D warnings  # lint
+cargo test --locked                      # unit, property, router and hermetic gRPC-web tests + shared vectors
+cargo deny check                         # RustSec advisories, licences, sources (deny.toml; CI runs it)
+cargo llvm-cov --locked --summary-only   # coverage figure (CI prints it)
+cargo build --release --locked           # production binary
 
 # Network-dependent checks (ignored by default):
-cargo test -- --ignored live_consume     # Sui testnet gRPC consume verification
+cargo test -- --ignored live_gate        # gate + ownership requests against the testnet relay gate
+# A recent consume (listEvents on <pkg>::access_gate::AccessConsumedEvent, newest first); public
+# fullnodes prune old transactions within about a week, so no digest is fixed in the source:
+NFT_GATE_LIVE_DIGEST=<digest> NFT_GATE_LIVE_SENDER=0x<sender> NFT_GATE_LIVE_GATE=0x<gate> \
+  NFT_GATE_LIVE_PACKAGE=0x<access_gate package> \
+  cargo test -- --ignored live_consume   # real-node check of the GetTransaction wire format
 REDIS_URL=redis://:<password>@127.0.0.1:6379 \
   cargo test -- --ignored redis_backend  # Redis/Dragonfly backend incl. the Lua lease release
 ```
@@ -216,5 +222,22 @@ docker build -t nft-gate-gateway .
 docker buildx build --platform linux/amd64,linux/arm64 -t nft-gate-gateway .
 ```
 
-The image uses a distroless runtime (`gcr.io/distroless/cc-debian12:nonroot`). Pin base images
+The image uses a distroless runtime (`gcr.io/distroless/cc-debian13:nonroot`). Pin base images
 by digest in production to prevent supply-chain drift.
+
+### Verify a published image
+
+Public images (quay.io and Docker Hub, by digest) are scanned with Trivy, then signed keyless with
+cosign by the publish workflow, with an SPDX SBOM attestation and a build-provenance attestation.
+Verify against the workflow identity before running one:
+
+```bash
+cosign verify quay.io/meddleware-org/nft-gate-gateway@sha256:<digest> \
+  --certificate-identity-regexp '^https://github.com/meddleware-org/nft-gate/\.github/workflows/docker-publish\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+cosign verify-attestation --type spdxjson quay.io/meddleware-org/nft-gate-gateway@sha256:<digest> \
+  --certificate-identity-regexp '^https://github.com/meddleware-org/nft-gate/\.github/workflows/docker-publish\.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+The best-effort self-hosted registry mirror is unsigned; deploy from the signed public images by digest.

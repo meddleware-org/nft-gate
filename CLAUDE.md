@@ -75,7 +75,9 @@ for the on-chain side.
 | Cloudflare edge distribution | Redis for horizontal scale-out |
 | Already on Cloudflare | Lowest latency on own hardware |
 
-Both are drop-in: same endpoints, same env vars, identical verification decisions.
+Same endpoints, same env vars, identical verification decisions. Caveat: `gateway-rust/` buffers bodies
+(`MAX_BODY_BYTES` 256 KiB default), so it is scoped to small-body upstreams and is not a drop-in for the
+100 MiB relay (audit F6; it is not deployed).
 
 > **Transport (2026-09):** both gateways query the chain over **gRPC** (public Sui fullnodes
 > deprecated JSON-RPC). `gateway-workers/` uses `@mysten/sui`'s `SuiGrpcClient`; `gateway-rust/`
@@ -101,7 +103,7 @@ The gateway does NOT trust:
   chain over hand-rolled gRPC-web (`grpc.rs`) with digest-first single-use verification and the
   consumeDigest **redemption** store (`NonceStore` lease/commit/release, `main.rs` orchestration),
   at parity with `gateway-workers/`. Validated by `cargo test` + a live testnet check
-  (`sui_rpc::tests::live_consume_tx_valid`, `--ignored`). It is buildable/deployable but not
+  (hermetic fixtures in `sui_rpc.rs`; the optional `--ignored live_` tests take a fresh consume from `NFT_GATE_LIVE_*`). It is buildable/deployable but not
   currently deployed — the live paywall still runs on the Workers gateway.
 - **multisig / zkLogin support (audit F1):** Requires the official Sui verifier. Until then, both
   fail closed with a log warning.

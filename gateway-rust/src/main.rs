@@ -913,4 +913,79 @@ mod tests {
         let _ = stop.send(());
         server.await.unwrap().unwrap();
     }
+
+    #[tokio::test]
+    async fn the_connection_cap_holds_extra_clients_until_a_slot_frees() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let limits = ServerLimits {
+            header_read_timeout: std::time::Duration::from_secs(30),
+            max_connections: 1,
+            shutdown_grace: std::time::Duration::from_secs(1),
+        };
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve(listener, cors_app(), limits, async {
+            let _ = stopped.await;
+        }));
+        // The only slot is taken by an idle keep-alive connection.
+        let mut first = tokio::net::TcpStream::connect(addr).await.unwrap();
+        first
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await
+            .unwrap();
+        let mut buf = [0u8; 256];
+        assert!(first.read(&mut buf).await.unwrap() > 0);
+        // A second client connects (TCP backlog) but is not served while the first holds the slot.
+        let mut second = tokio::net::TcpStream::connect(addr).await.unwrap();
+        second
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(300), second.read(&mut buf))
+                .await;
+        assert!(waited.is_err(), "served beyond the connection cap");
+        // Freeing the slot lets it through.
+        drop(first);
+        let mut out = String::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            second.read_to_string(&mut out),
+        )
+        .await
+        .expect("served once a slot frees")
+        .unwrap();
+        assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+        let _ = stop.send(());
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_gives_in_flight_requests_a_bounded_grace() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let limits = ServerLimits {
+            header_read_timeout: std::time::Duration::from_secs(60),
+            max_connections: 4,
+            shutdown_grace: std::time::Duration::from_millis(300),
+        };
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(serve(listener, cors_app(), limits, async {
+            let _ = stopped.await;
+        }));
+        // A client that never finishes its request keeps a connection open.
+        let mut stuck = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stuck.write_all(b"GET /healthz HTTP/1.1\r\n").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        let _ = stop.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("serve must return after the grace period")
+            .unwrap()
+            .unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
 }
